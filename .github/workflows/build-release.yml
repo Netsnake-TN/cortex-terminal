@@ -20,6 +20,10 @@ on:
         description: "Build, sign and verify the APKs but publish nothing (tests the signing setup)"
         type: boolean
         default: false
+      prerelease:
+        description: "Publish the release as a pre-release: the in-app updater only offers the latest full release, so nobody is offered it until it is promoted"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -487,6 +491,21 @@ jobs:
 
           echo "Preparing release $VERSION..."
 
+          PRERELEASE_FLAG=""
+          if [ "${{ github.event.inputs.prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          # An automatic run (a push) must not replace the pre-release of this version with a full
+          # release: the in-app updater would offer it to everybody. Promotion is a manual decision
+          # (gh release edit --prerelease=false --latest) or a manual run with prerelease unticked.
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] &&
+             [ "$(gh release view "$VERSION" --json isPrerelease --jq .isPrerelease 2>/dev/null)" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          if [ -n "$PRERELEASE_FLAG" ]; then
+            echo "Publishing $VERSION as a pre-release."
+          fi
+
           # Delete existing release/tag with same version if present so update succeeds cleanly
           gh release delete "$VERSION" --yes --cleanup-tag 2>/dev/null || true
           git tag -d "$VERSION" 2>/dev/null || true
@@ -513,4 +532,5 @@ jobs:
             release-apks/Cortex-arm64-v8a-signed.apk \
             release-apks/Cortex-armeabi-v7a-signed.apk \
             --title "Cortex Release $VERSION" \
-            --notes-file release-notes.md
+            --notes-file release-notes.md \
+            $PRERELEASE_FLAG
