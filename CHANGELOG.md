@@ -4,6 +4,35 @@ What changed in each version of Cortex Terminal, newest first. The release workf
 of a GitHub release from the section of its version here. Older versions are described on the
 [GitHub releases](https://github.com/ssfuisu/cortex/releases) page.
 
+## 1.26.34 (2026-10-20)
+
+### New
+
+- **Root mode.** On a rooted phone (Magisk, KernelSU or APatch), *Settings > Root mode* runs new
+  sessions as real root in a chroot of the same Ubuntu files that normal sessions use, with nothing
+  translated or emulated: statically linked Go programs, `mount`, real `chown`, hard links,
+  set-user-ID programs such as `sudo` for other users, services that switch users and ports below
+  1024 work as on a Linux PC. The switch first checks
+  that su gives root and that the chroot can be set up (with an animation), and stays on across
+  restarts until it is turned off. Each root session gets its own `/proc`, `/sys`, `/dev` and
+  `/sdcard` mounts, which nothing outside the session sees. In root mode `su` is Ubuntu's own su
+  and `sudo` runs the command directly. Root sessions are marked ROOT in the session list.
+  Turning root mode off closes them and gives the files created as root back to the app, so that
+  normal sessions can change them again.
+
+### Good to know
+
+- While root mode is on, normal sessions that are still open cannot change files created as root.
+- When root mode is turned off, every file belongs to the app again: owners set in root mode (for
+  example a database directory owned by `postgres`) have to be set again in the next root session.
+- systemd still cannot run as the init system, and Android commands such as `am` are not inside the
+  chroot.
+
+### For developers
+
+- `app/src/main/cpp/root/cortex-chroot.c` is root mode's helper (a static executable run through
+  su); `tests/root/test_cortex_chroot.sh` tests it with real mounts in CI.
+
 ## 1.26.33 (2026-10-19)
 
 ### New
