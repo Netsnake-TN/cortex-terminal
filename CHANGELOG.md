@@ -4,6 +4,42 @@ What changed in each version of Cortex Terminal, newest first. The release workf
 of a GitHub release from the section of its version here. Older versions are described on the
 [GitHub releases](https://github.com/ssfuisu/cortex/releases) page.
 
+## 1.26.35 (2026-10-23)
+
+### New
+
+- **`cortex-api`: Android features from the terminal.** Programs can show notifications, read and
+  set the clipboard, open links and files in Android apps, share text and files, read the battery
+  state, show a toast, speak text and vibrate, and keep the CPU awake (`cortex-api --help` lists
+  the commands). It works in normal and in root mode. `notify-send` now shows its notifications on
+  Android, and `xdg-open` (with `open`, `termux-open` and the browser names) opens links and files
+  in Android apps instead of only printing them. Only Cortex itself and root can use it.
+
+### Good to know
+
+- Android lets an app open other apps only while it is on screen, and from Android 10 on also read
+  the clipboard only then: `cortex-api open` and `share` (and `clipboard-get` from Android 10 on)
+  report an error while Cortex is in the background (`xdg-open` then prints the link as before).
+
+### Fixed
+
+- The README and the website no longer say that Cortex never uses a chroot (root mode does).
+
+### For developers
+
+- The cortex-api client is a bash script (`app/src/main/assets/scripts/cortex-api.sh`) that talks
+  to `org.cortex.terminal.api.ApiServer` over 127.0.0.1 with a token from `/run/cortex-api`; the
+  shell tests run it against a stand-in server (`tests/scripts/cortex_api_mock.py`).
+- **End-to-end test on an Android emulator** (`tests/e2e/`, `.github/workflows/emulator-test.yml`).
+  For pull requests and dry runs, the arm64 APK is installed on an Android 14 x86_64 emulator, whose
+  ARM translator runs Ubuntu. The test waits for Ubuntu to be unpacked, types a command into the
+  terminal like a user, and checks the system, files, `apt install`, Python and every cortex-api
+  command, and that the notifications appear on Android; it keeps screenshots and logcat. A manual
+  run with `emulator_test_of_run` tests the APKs of an earlier run without building. Android 11's
+  translator crashes every forked glibc program, so the test uses Android 14; on the emulator,
+  arm64 programs start through a small shim (`tests/e2e/emu-runner.c`) that keeps `LD_PRELOAD` and
+  `LD_LIBRARY_PATH` away from the translator itself.
+
 ## 1.26.34 (2026-10-20)
 
 ### New
