@@ -316,6 +316,59 @@ static void test_extract_tar_end_to_end(void) {
 
     ASSERT_EQ(extract_tar_archive(tar_trunc, dest_trunc), -1, "truncated tar must return -1");
 
+    /* 4e. A directory entry where a symlink already is (the app links dev/shm to /tmp/shm before
+     * extracting): the symlink becomes a directory, nothing is written through it, and the rest
+     * of the archive is extracted. */
+    char tar_dirlink[PATH_MAX], dest_dirlink[PATH_MAX], link_target[PATH_MAX];
+    snprintf(tar_dirlink, sizeof(tar_dirlink), "%s/dirlink.tar", tmp_base);
+    snprintf(dest_dirlink, sizeof(dest_dirlink), "%s/dest_dirlink", tmp_base);
+    snprintf(link_target, sizeof(link_target), "%s/shm_outside", tmp_base);
+    mkdir(dest_dirlink, 0755);
+    mkdir(link_target, 0755);
+    snprintf(check_path, sizeof(check_path), "%s/dev", dest_dirlink);
+    mkdir(check_path, 0755);
+    snprintf(check_path, sizeof(check_path), "%s/dev/shm", dest_dirlink);
+    ASSERT_EQ(symlink(link_target, check_path), 0, "pre-existing absolute dev/shm symlink");
+
+    fd = open(tar_dirlink, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ASSERT_TRUE(fd >= 0, "open dirlink.tar");
+    init_tar_header(blk, "./dev/", NULL, 0755, 0, '5', NULL);
+    write(fd, blk, 512);
+    init_tar_header(blk, "./dev/shm/", NULL, 01777, 0, '5', NULL);
+    write(fd, blk, 512);
+    init_tar_header(blk, "./dev/shm/inside.txt", NULL, 0644, 2, '0', NULL);
+    write(fd, blk, 512);
+    write_padded_data(fd, "ok", 2);
+    init_tar_header(blk, "./usr/bin/after", NULL, 0755, 2, '0', NULL);
+    write(fd, blk, 512);
+    write_padded_data(fd, "ok", 2);
+    init_tar_header(blk, "./etc/sudoers", NULL, 0440, 2, '0', NULL);
+    write(fd, blk, 512);
+    write_padded_data(fd, "ok", 2);
+    /* a hard link entry: a link where the system allows one, else a relative symlink */
+    init_tar_header(blk, "./usr/bin/after-too", NULL, 0755, 0, '1', "./usr/bin/after");
+    write(fd, blk, 512);
+    write_eof_blocks(fd);
+    close(fd);
+
+    ASSERT_EQ(extract_tar_archive(tar_dirlink, dest_dirlink), 0, "a directory entry replaces a symlink in its place");
+    snprintf(check_path, sizeof(check_path), "%s/dev/shm", dest_dirlink);
+    ASSERT_EQ(lstat(check_path, &st), 0, "dev/shm exists");
+    ASSERT_TRUE(S_ISDIR(st.st_mode), "dev/shm is a real directory now");
+    snprintf(check_path, sizeof(check_path), "%s/dev/shm/inside.txt", dest_dirlink);
+    ASSERT_EQ(lstat(check_path, &st), 0, "dev/shm/inside.txt is in the rootfs");
+    snprintf(check_path, sizeof(check_path), "%s/inside.txt", link_target);
+    ASSERT_TRUE(lstat(check_path, &st) != 0, "nothing was written through the old symlink");
+    snprintf(check_path, sizeof(check_path), "%s/usr/bin/after", dest_dirlink);
+    ASSERT_EQ(lstat(check_path, &st), 0, "the entries after it are extracted");
+    ASSERT_EQ(st.st_mode & 0777, 0755, "a file keeps its mode from the archive");
+    snprintf(check_path, sizeof(check_path), "%s/etc/sudoers", dest_dirlink);
+    ASSERT_EQ(lstat(check_path, &st), 0, "etc/sudoers is extracted");
+    ASSERT_EQ(st.st_mode & 0777, 0640, "the owner (root here) can always read and write");
+    snprintf(check_path, sizeof(check_path), "%s/usr/bin/after-too", dest_dirlink);
+    ASSERT_EQ(stat(check_path, &st), 0, "the hard link entry leads to the file");
+    ASSERT_EQ(st.st_size, 2, "with its content");
+
     rm_rf(tmp_base);
 }
 
@@ -546,6 +599,18 @@ static void test_sigsys_and_close_fds(void) {
     close_all_inherited_fds(dup_fd + 1);
     ASSERT_EQ(fcntl(dup_fd, F_GETFD), -1, "dup_fd must be closed by close_all_inherited_fds");
     ASSERT_TRUE(fcntl(2, F_GETFD) != -1, "stderr (fd 2) must remain open");
+
+    /* Descriptors far apart (the open ones are listed, not every number tried); none at or above
+     * max_fd is touched. */
+    ASSERT_EQ(dup2(2, 900), 900, "dup2 to 900");
+    ASSERT_EQ(dup2(2, 4000), 4000, "dup2 to 4000");
+    ASSERT_EQ(dup2(2, 5000), 5000, "dup2 to 5000");
+    close_all_inherited_fds(5000);
+    ASSERT_EQ(fcntl(900, F_GETFD), -1, "fd 900 is closed");
+    ASSERT_EQ(fcntl(4000, F_GETFD), -1, "fd 4000 is closed");
+    ASSERT_TRUE(fcntl(5000, F_GETFD) != -1, "fd 5000 (max_fd) stays open");
+    ASSERT_TRUE(fcntl(2, F_GETFD) != -1, "stderr stays open");
+    close(5000);
 }
 
 /* 9. Test emulated hardlink and st_nlink reporting (fixing groupadd/shadow /etc/group.lock failure) */
