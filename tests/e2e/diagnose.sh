@@ -31,7 +31,7 @@ done
 env_for_shell() {
     echo "HOME=$ROOT/home" "CORTEX_ROOT=$ROOT" "TMPDIR=$ROOT/tmp" "TERM=xterm-256color" \
         "PATH=$ROOT/usr/local/bin:$ROOT/usr/bin:$ROOT/usr/sbin:/system/bin" \
-        "LD_LIBRARY_PATH=$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/lib/aarch64-linux-gnu:$ROOT/usr/lib:$ROOT/lib" \
+        "LD_LIBRARY_PATH=$ROOT/usr/lib/$TRIPLET:$ROOT/lib/$TRIPLET:$ROOT/usr/lib:$ROOT/lib" \
         "GLIBC_TUNABLES=glibc.pthread.rseq=0" "LANG=C.UTF-8"
 }
 
@@ -46,9 +46,10 @@ try() { # try NAME COMMAND...: runs COMMAND for at most 60 s
 }
 
 cd "$ROOT/home" || exit 1
-# Like Cortex does, through glibc's ld.so (Ubuntu's programs ask for /lib/ld-linux-aarch64.so.1,
-# which is not where Android looks).
-LDSO="$ROOT/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
+# Like Cortex does, through glibc's ld.so (Ubuntu's programs ask for /lib/ld-linux-aarch64.so.1 or
+# /lib/ld-linux-armhf.so.3, which is not where Android looks).
+LDSO=$(ls "$ROOT"/usr/lib/*-linux-gnu*/ld-linux-*.so.* 2>/dev/null | head -n 1)
+TRIPLET=$(basename "$(dirname "$LDSO")")
 HOOK="LD_PRELOAD=$ROOT/usr/lib/libcortex-hook.so"
 try "bash, as root, without the hook" env -i $(env_for_shell) "$LDSO" "$ROOT/usr/bin/bash" -c 'echo bash-ok; uname -m'
 try "bash, as root, with the hook" env -i $(env_for_shell) "$HOOK" "$LDSO" "$ROOT/usr/bin/bash" -c 'echo hook-ok; id; ls /'
@@ -56,6 +57,18 @@ try "login bash with the hook, as the app's user" su "$uid" env -i $(env_for_she
     "$LDSO" "$ROOT/usr/bin/bash" -l -c 'echo login-ok'
 try "apt-get with the hook, as the app's user" su "$uid" env -i $(env_for_shell) "$HOOK" \
     "$LDSO" "$ROOT/usr/bin/bash" -c 'apt-get --version | head -n 1'
+# Hard links: ln in one process, stat in the next, and what they do with the table of emulated links
+# that the processes share. (Run through su, outside the app's SELinux domain, link() itself may
+# succeed here; the app's processes are denied it and get the emulation.)
+HL_TEST='cd "$(mktemp -d)" && echo one > a && ln a b && stat -c "%n: links %h, inode %i, device %d, modified %y" a b'
+try "hard links between processes, as the app's user" su "$uid" env -i $(env_for_shell) "$HOOK" \
+    "$LDSO" "$ROOT/usr/bin/bash" -c "$HL_TEST; ls -l /var/lib/cortex/hardlinks"
+if command -v strace >/dev/null; then
+    timeout 60 strace -f -o /data/local/tmp/cortex-strace-hl.txt su "$uid" env -i $(env_for_shell) "$HOOK" \
+        "$LDSO" "$ROOT/usr/bin/bash" -c "$HL_TEST" >/dev/null 2>&1
+    echo "--- system calls of ln and stat on the table and the files"
+    grep -E 'hardlinks|mmap\(NULL, 589824|F_SETLKW|linkat|statx\(|newfstatat\(' /data/local/tmp/cortex-strace-hl.txt | tail -n 60
+fi
 try "id without the hook" env -i $(env_for_shell) "$LDSO" "$ROOT/usr/bin/id"
 try "apt-get without the hook" env -i $(env_for_shell) "$LDSO" "$ROOT/usr/bin/apt-get" --version
 try "id with the hook, directly" env -i $(env_for_shell) "$HOOK" "$LDSO" "$ROOT/usr/bin/id"

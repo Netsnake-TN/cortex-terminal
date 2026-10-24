@@ -437,7 +437,8 @@ int lstat(const char *pathname, struct stat *statbuf) {
             if (ret == 0) target = retry;
         }
     }
-    if (ret == 0 && statbuf && S_ISLNK(statbuf->st_mode) && g_cortex_root[0] != '\0' && target) {
+    if (ret == 0 && statbuf && S_ISLNK(statbuf->st_mode) && g_cortex_root[0] != '\0' && target &&
+        readlink_result_may_change(pathname, (long long)statbuf->st_size)) {
         char link_buf[PATH_MAX];
         static ssize_t (*orig_readlink)(const char *, char *, size_t) = NULL;
         if (!orig_readlink) orig_readlink = (ssize_t (*)(const char *, char *, size_t))dlsym(RTLD_NEXT, "readlink");
@@ -468,7 +469,8 @@ int fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags) {
             if (ret == 0) target = retry;
         }
     }
-    if (ret == 0 && statbuf && (flags & AT_SYMLINK_NOFOLLOW) && S_ISLNK(statbuf->st_mode) && g_cortex_root[0] != '\0' && target) {
+    if (ret == 0 && statbuf && (flags & AT_SYMLINK_NOFOLLOW) && S_ISLNK(statbuf->st_mode) && g_cortex_root[0] != '\0' && target &&
+        readlink_result_may_change(pathname, (long long)statbuf->st_size)) {
         char link_buf[PATH_MAX];
         static ssize_t (*orig_readlinkat)(int, const char *, char *, size_t) = NULL;
         if (!orig_readlinkat) orig_readlinkat = (ssize_t (*)(int, const char *, char *, size_t))dlsym(RTLD_NEXT, "readlinkat");
@@ -549,15 +551,32 @@ int statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct 
     char buf[PATH_MAX];
     const char *target = (pathname && pathname[0] == '/') ? rewrite_path(pathname, buf, sizeof(buf)) : pathname;
     int ret = orig_statx ? orig_statx(dirfd, target, flags, mask, statxbuf) : -1;
-    if (ret == 0 && statxbuf && g_hardlinks_any && (statxbuf->stx_mask & STATX_INO)) {
-        struct stat st;
-        memset(&st, 0, sizeof(st));
-        st.st_dev = makedev(statxbuf->stx_dev_major, statxbuf->stx_dev_minor);
-        st.st_ino = statxbuf->stx_ino;
-        st.st_nlink = statxbuf->stx_nlink;
-        apply_emulated_hardlink(&st);
-        statxbuf->stx_ino = st.st_ino;
-        statxbuf->stx_nlink = st.st_nlink;
+    if (ret == 0 && statxbuf && hardlinks_maybe_any()) {
+        const unsigned int needed = STATX_INO | STATX_NLINK | STATX_MTIME;
+        struct statx full;
+        const struct statx *sx = statxbuf;
+        if ((statxbuf->stx_mask & needed) != needed) {
+            // The caller asked for less ("stat -c %h" for the link count only): what an emulated
+            // link is recognized by
+            int saved_errno = errno;
+            sx = orig_statx(dirfd, target, flags, needed, &full) == 0 && (full.stx_mask & needed) == needed ? &full : NULL;
+            errno = saved_errno;
+        }
+        if (sx) {
+            struct stat st;
+            memset(&st, 0, sizeof(st));
+            st.st_dev = makedev(sx->stx_dev_major, sx->stx_dev_minor);
+            st.st_ino = sx->stx_ino;
+            st.st_nlink = sx->stx_nlink;
+            st.st_mtim.tv_sec = sx->stx_mtime.tv_sec;
+            st.st_mtim.tv_nsec = sx->stx_mtime.tv_nsec;
+            apply_emulated_hardlink(&st);
+            if (st.st_ino != sx->stx_ino || st.st_nlink != sx->stx_nlink) {
+                statxbuf->stx_ino = st.st_ino;
+                statxbuf->stx_nlink = st.st_nlink;
+                statxbuf->stx_mask |= STATX_INO | STATX_NLINK;
+            }
+        }
     }
     return ret;
 }

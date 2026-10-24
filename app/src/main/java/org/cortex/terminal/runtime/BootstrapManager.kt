@@ -12,7 +12,7 @@ import java.util.zip.GZIPInputStream
 
 object BootstrapManager {
     private const val TAG = "BootstrapManager"
-    const val CURRENT_BOOTSTRAP_VERSION = 12636
+    const val CURRENT_BOOTSTRAP_VERSION = 12637
 
     fun initializeFileSystem(context: Context) {
         val root = Environment.getCortexRoot(context)
@@ -31,6 +31,7 @@ object BootstrapManager {
 
         ensureRootTools(root, context)
         ensureBrowserOpener(root, context)
+        ShellScriptsInstaller.ensureAptAutoUpdate(root, context)
 
         // ~/.profile and ~/.bashrc are the user's own files (created once from /etc/skel, see
         // ShellProfile). Cortex's environment lives in /etc/profile.d, never in the user's files.
@@ -195,9 +196,22 @@ object BootstrapManager {
         return null
     }
 
-    fun installBootstrapFromAssets(context: Context): Boolean {
-        val root = Environment.getCortexRoot(context)
+    /**
+     * Extracts and sets up the Ubuntu base system. [onProgress] gets the share of the archive read so
+     * far (0-100) while it is extracted, from the extracting thread.
+     */
+    fun installBootstrapFromAssets(context: Context, onProgress: ((Int) -> Unit)? = null): Boolean {
         val assetName = findBootstrapAsset(context) ?: return false
+        return installBootstrap(context, { context.assets.open(assetName) }, onProgress)
+    }
+
+    /** [installBootstrapFromAssets] with the archive (tar or tar.gz) from [open], which tests use. */
+    internal fun installBootstrap(
+        context: Context,
+        open: () -> InputStream,
+        onProgress: ((Int) -> Unit)? = null
+    ): Boolean {
+        val root = Environment.getCortexRoot(context)
         val started = android.os.SystemClock.uptimeMillis()
 
         val tmpTar = File(context.cacheDir, "bootstrap.tar")
@@ -232,10 +246,10 @@ object BootstrapManager {
 
             // Extract archive using high performance native C extractor. It applies the archive's
             // modes and gives the owner access to every file and directory.
-            if (!extractBootstrapStreaming(context, assetName, root)) {
+            if (!extractBootstrapStreaming(open, root, onProgress)) {
                 Log.w(TAG, "Native extraction failed, using the system tar")
                 // Fallback to system tar, which needs the archive as a file
-                openBootstrap(context, assetName).use { stream ->
+                openBootstrap(open).use { stream ->
                     tmpTar.outputStream().use { out -> stream.copyTo(out) }
                 }
                 val tarCmd = when {
@@ -297,9 +311,15 @@ object BootstrapManager {
         }
     }
 
-    /** The bootstrap archive as a plain tar stream (unzipped when it is gzip-compressed). */
-    private fun openBootstrap(context: Context, assetName: String): InputStream {
-        val pushback = PushbackInputStream(context.assets.open(assetName), 2)
+    /**
+     * The bootstrap archive as a plain tar stream (unzipped when it is gzip-compressed). [onProgress]
+     * gets the share of the asset read so far (0-100), when its size is known.
+     */
+    private fun openBootstrap(open: () -> InputStream, onProgress: ((Int) -> Unit)? = null): InputStream {
+        val raw = open()
+        val total = try { raw.available().toLong() } catch (e: java.io.IOException) { 0L }
+        val counted = if (onProgress != null && total > 0) ProgressInputStream(raw, total, onProgress) else raw
+        val pushback = PushbackInputStream(counted, 2)
         val header = ByteArray(2)
         val bytesRead = pushback.read(header)
         if (bytesRead > 0) {
@@ -314,7 +334,11 @@ object BootstrapManager {
      * native extractor reads, so the few hundred megabytes are never copied into the cache first (that
      * took time and needed that much free space on top). True when the whole archive was extracted.
      */
-    private fun extractBootstrapStreaming(context: Context, assetName: String, root: File): Boolean {
+    private fun extractBootstrapStreaming(
+        open: () -> InputStream,
+        root: File,
+        onProgress: ((Int) -> Unit)?
+    ): Boolean {
         val pipe = try {
             android.os.ParcelFileDescriptor.createPipe()
         } catch (e: Exception) {
@@ -326,7 +350,7 @@ object BootstrapManager {
             try {
                 android.os.ParcelFileDescriptor.AutoCloseOutputStream(pipe[1]).use { out ->
                     try {
-                        openBootstrap(context, assetName).use { input ->
+                        openBootstrap(open, onProgress).use { input ->
                             val buffer = ByteArray(256 * 1024)
                             while (true) {
                                 val n = input.read(buffer)
@@ -348,6 +372,7 @@ object BootstrapManager {
             }
         }, "Cortex-BootstrapStream")
         writer.start()
+        val started = android.os.SystemClock.uptimeMillis()
         val result = try {
             PtyNative.extractTarFd(pipe[0].fd, root.absolutePath)
         } catch (t: Throwable) {
@@ -358,6 +383,7 @@ object BootstrapManager {
             writer.join()
         }
         readError?.let { Log.e(TAG, "Reading the bootstrap archive failed", it) }
+        Log.i(TAG, "Extracted the base system in ${android.os.SystemClock.uptimeMillis() - started} ms (status $result)")
         return result == 0 && readError == null
     }
 
@@ -1496,17 +1522,45 @@ object BootstrapManager {
         ) ?: return -1
 
         try {
-            val stream = pty.inputStream
-            val buffer = ByteArray(2048)
+            // All of the output (only the first 256 bytes of each read came through), decoded as one
+            // text so that a character split between two reads stays whole. Not closed here: the
+            // terminal belongs to the PtyProcess, which closes it in waitFor().
+            val reader = java.io.InputStreamReader(pty.inputStream, Charsets.UTF_8)
+            val buffer = CharArray(2048)
             while (true) {
-                val read = stream.read(buffer)
+                val read = reader.read(buffer)
                 if (read <= 0) break
-                val str = String(buffer, 0, minOf(read, 256), Charsets.UTF_8)
-                onProgress?.invoke(str)
+                onProgress?.invoke(String(buffer, 0, read))
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Background command stream error", e)
+        } catch (e: java.io.IOException) {
+            // EIO: the command has ended and closed the terminal
         }
         return pty.waitFor()
     }
+}
+
+/** Reports how much of [total] bytes has been read, in whole percent, whenever that changes. */
+internal class ProgressInputStream(
+    input: InputStream,
+    private val total: Long,
+    private val onProgress: (Int) -> Unit
+) : java.io.FilterInputStream(input) {
+    private var done = 0L
+    private var reported = -1
+
+    private fun advance(n: Long) {
+        if (n <= 0) return
+        done += n
+        val percent = (done * 100 / total).toInt().coerceIn(0, 100)
+        if (percent != reported) {
+            reported = percent
+            onProgress(percent)
+        }
+    }
+
+    override fun read(): Int = super.read().also { if (it >= 0) advance(1) }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int = super.read(b, off, len).also { advance(it.toLong()) }
+
+    override fun skip(n: Long): Long = super.skip(n).also { advance(it) }
 }

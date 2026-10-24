@@ -16,8 +16,10 @@ android {
         // from the app's writable data directory (filesDir). Android 10+ (targetSdk >= 29)
         // enforces SELinux W^X restrictions preventing execution from writable app data storage.
         targetSdk = 28
-        versionCode = 12636
-        versionName = "1.26.36"
+        versionCode = 12637
+        versionName = "1.26.37"
+        // UbuntuOnDeviceTest (app/src/androidTest), on Firebase Test Lab
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         externalNativeBuild {
             cmake {
@@ -137,6 +139,13 @@ android {
     testOptions {
         unitTests {
             isReturnDefaultValues = true
+            // Robolectric tests (BootstrapManagerFlowTest) read the app's assets
+            isIncludeAndroidResources = true
+            all {
+                it.maxHeapSize = "2g"
+                // The assertion's message in CI's log, not only in the HTML report
+                it.testLogging.exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+            }
         }
     }
 
@@ -157,4 +166,9 @@ dependencies {
     implementation(libs.androidx.viewpager2)
 
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.junit)
 }

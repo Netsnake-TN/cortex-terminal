@@ -613,6 +613,14 @@ static void test_sigsys_and_close_fds(void) {
     close(5000);
 }
 
+/* Forgets this process' mapping of the hard link table, as a new process starts without one. */
+static void hl_reset_for_test(void) {
+    if (g_hl_table) munmap(g_hl_table, CORTEX_HL_MAP_SIZE);
+    g_hl_table = NULL;
+    g_hl_shared = 0;
+    g_hl_next_try = 0;
+}
+
 /* 9. Test emulated hardlink and st_nlink reporting (fixing groupadd/shadow /etc/group.lock failure) */
 static void test_hardlink_emulation_and_st_nlink(void) {
     const char *tmp = get_test_tmp_dir();
@@ -765,7 +773,8 @@ static void test_emulated_hardlink_groups(void) {
     ASSERT_EQ(hook_unlink(a), 0, "unlink a");
     ASSERT_EQ(hook_stat(b, &sb), 0, "stat b after a went away");
     ASSERT_EQ(sb.st_nlink, 2, "b and c are left");
-    ASSERT_EQ(sb.st_ino, plain.st_ino, "b still reports the inode of the link group");
+    ASSERT_EQ(hook_stat(c, &sc), 0, "stat c after a went away");
+    ASSERT_TRUE(sb.st_ino != plain.st_ino && sb.st_ino == sc.st_ino, "with a gone, b and c report one of theirs");
     dev_t hl_dev = 0;
     ino_t hl_ino = 0;
     ASSERT_EQ(lookup_emulated_hardlink_at(dirfd, "b", &hl_dev, &hl_ino), 1, "b, named relative to the directory, is found");
@@ -774,7 +783,7 @@ static void test_emulated_hardlink_groups(void) {
     ASSERT_EQ(hook_stat(c, &sc), 0, "stat c");
     ASSERT_EQ(sc.st_nlink, 1, "the last copy is a plain file again");
     ASSERT_TRUE(sc.st_ino != plain.st_ino, "and reports its own inode");
-    ASSERT_EQ(g_hardlinks_any, 0, "nothing is tracked any more");
+    ASSERT_EQ(hardlinks_maybe_any(), 0, "nothing is tracked any more");
 
     // Many links in one process (dpkg unpacking a package full of hard links) are all kept
     for (int i = 0; i < 300; i++) {
@@ -786,10 +795,159 @@ static void test_emulated_hardlink_groups(void) {
 
     close(dirfd);
     rm_rf(dir);
+    hl_reset_for_test();
+}
+
+/* 9c. When the original of a group goes, the copies left report one of theirs: its inode number can
+ * be given to a new file, which must not join them */
+static void test_emulated_hardlink_original_removed(void) {
+    const char *tmp = get_test_tmp_dir();
+    char dir[PATH_MAX], a[PATH_MAX], b[PATH_MAX], e[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/cortex_hlo_%d", tmp, getpid());
+    rm_rf(dir);
+    ASSERT_EQ(mkdir(dir, 0700), 0, "mkdir test dir");
+    snprintf(a, sizeof(a), "%s/a", dir);
+    snprintf(b, sizeof(b), "%s/b", dir);
+    snprintf(e, sizeof(e), "%s/e", dir);
+    hl_reset_for_test();
+
+    int fd = open(a, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    ASSERT_TRUE(fd >= 0, "create a");
+    ASSERT_EQ(write(fd, "data", 4), 4, "write a");
+    close(fd);
+    struct stat sa, sb, se, real_b, real_e;
+    ASSERT_EQ(stat(a, &sa), 0, "stat a");
+    ASSERT_EQ(cortex_emulate_hardlink(a, b), 0, "link a -> b");
+    ASSERT_EQ(cortex_emulate_hardlink(a, e), 0, "link a -> e");
+    ASSERT_EQ(stat(b, &real_b), 0, "the real inode of b");
+    ASSERT_EQ(stat(e, &real_e), 0, "the real inode of e");
+    ASSERT_EQ(hook_unlink(a), 0, "remove the original");
+
+    ASSERT_EQ(hook_stat(b, &sb), 0, "stat b");
+    ASSERT_EQ(hook_stat(e, &se), 0, "stat e");
+    ASSERT_EQ(sb.st_nlink, 2, "b and e are left");
+    // Which of the two the group takes depends on where the table keeps them
+    ASSERT_TRUE(sb.st_ino == real_b.st_ino || sb.st_ino == real_e.st_ino,
+                "the group reports the inode of a copy left, not the removed one's");
+    ASSERT_EQ(se.st_ino, sb.st_ino, "b and e report the same inode");
+
+    // A new file c gets the inode number of the removed a and is linked to d
+    struct stat c = sa, d = sa;
+    c.st_mtim.tv_sec = sa.st_mtim.tv_sec + 100;
+    d.st_mtim = c.st_mtim;
+    d.st_ino = (ino_t)0x7ffffff0;
+    register_emulated_hardlink(&c, &d);
+    ASSERT_EQ(hook_stat(b, &sb), 0, "stat b");
+    ASSERT_EQ(sb.st_nlink, 2, "b's group still has two copies");
+    struct stat sd = d;
+    sd.st_nlink = 1;
+    apply_emulated_hardlink(&sd);
+    ASSERT_EQ(sd.st_nlink, 2, "c and d form a group of their own");
+    ASSERT_EQ(sd.st_ino, sa.st_ino, "which reports c's inode");
+
+    rm_rf(dir);
+    hl_reset_for_test();
+}
+
+/* 9c. The table of emulated links is shared by the processes of a rootfs and outlives them */
+static void test_emulated_hardlinks_shared(void) {
+    char saved_root[PATH_MAX];
+    size_t saved_len = g_cortex_root_len;
+    memcpy(saved_root, g_cortex_root, sizeof(saved_root));
+    const char *tmp = get_test_tmp_dir();
+    char root[PATH_MAX], lib[PATH_MAX], table[PATH_MAX], a[PATH_MAX], b[PATH_MAX], c[PATH_MAX];
+    snprintf(root, sizeof(root), "%s/cortex_hls_%d", tmp, getpid());
+    rm_rf(root);
+    ASSERT_EQ(mkdir(root, 0700), 0, "mkdir rootfs");
+    snprintf(lib, sizeof(lib), "%s/var", root);
+    mkdir(lib, 0700);
+    snprintf(lib, sizeof(lib), "%s/var/lib", root);
+    mkdir(lib, 0700);
+    snprintf(table, sizeof(table), "%s/var/lib/cortex/hardlinks", root);
+    snprintf(a, sizeof(a), "%s/a", root);
+    snprintf(b, sizeof(b), "%s/b", root);
+    snprintf(c, sizeof(c), "%s/c", root);
+    // A stat() before the rootfs is known does not put off looking for the table
+    cortex_set_root("", 0);
+    hl_reset_for_test();
+    ASSERT_EQ(hardlinks_maybe_any(), 0, "no table without a rootfs");
+    ASSERT_EQ(g_hl_next_try, 0, "and no wait for one");
+    cortex_set_root(root, strlen(root));
+    hl_reset_for_test();
+
+    int fd = open(a, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    ASSERT_TRUE(fd >= 0, "create a");
+    ASSERT_EQ(write(fd, "pid\n", 4), 4, "write a");
+    close(fd);
+    struct stat plain, sa, sb;
+    ASSERT_EQ(stat(a, &plain), 0, "stat a");
+    ASSERT_EQ(hardlinks_maybe_any(), 0, "no table before the first link");
+
+    // ln a b in one process...
+    pid_t pid = fork();
+    if (pid == 0) _exit(cortex_emulate_hardlink(a, b) == 0 ? 0 : 1);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0, "a child process links a to b");
+    ASSERT_TRUE(stat(table, &sb) == 0 && (size_t)sb.st_size == CORTEX_HL_MAP_SIZE && CORTEX_HL_MAP_SIZE % 65536 == 0, "the table file is made in the rootfs, in whole 64 KB");
+
+    // A stat() while the table's lock is held (this library's fstat() inside the table's own set-up,
+    // or a child forked while another thread held it) finds no table instead of waiting forever
+    hl_reset_for_test();
     pthread_mutex_lock(&g_hardlinks_lock);
-    g_hardlinks_len = 0;
-    g_hardlinks_any = 0;
+    int any = hardlinks_maybe_any();
     pthread_mutex_unlock(&g_hardlinks_lock);
+    ASSERT_EQ(any, 0, "a reader does not wait for the lock");
+    ASSERT_EQ(hardlinks_maybe_any(), 1, "and finds the table once the lock is free");
+
+    // ...and stat a in another (this one looks for the table again after a second; a new process at once)
+    hl_reset_for_test();
+    ASSERT_EQ(hook_stat(a, &sa), 0, "stat a");
+    ASSERT_EQ(sa.st_nlink, 2, "another process sees the link count of a");
+    ASSERT_EQ(hook_stat(b, &sb), 0, "stat b");
+    ASSERT_EQ(sb.st_nlink, 2, "and of b");
+    ASSERT_EQ(sb.st_ino, plain.st_ino, "b reports the inode of a in another process");
+
+    // A third process removes b: this one, which has the table mapped, sees a plain file again
+    pid = fork();
+    if (pid == 0) _exit(hook_unlink(b) == 0 ? 0 : 1);
+    waitpid(pid, &status, 0);
+    ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0, "a child process removes b");
+    ASSERT_EQ(hook_stat(a, &sa), 0, "stat a");
+    ASSERT_EQ(sa.st_nlink, 1, "a is a plain file again");
+    ASSERT_EQ(hardlinks_maybe_any(), 0, "nothing is tracked any more");
+
+    // A copy written to no longer shares the original's content: it is a file of its own
+    ASSERT_EQ(cortex_emulate_hardlink(a, c), 0, "link a -> c");
+    ASSERT_EQ(hook_stat(c, &sb), 0, "stat c");
+    ASSERT_EQ(sb.st_nlink, 2, "c is linked");
+    struct timespec later[2] = { { 1700000000, 0 }, { 1700000000, 0 } };
+    ASSERT_EQ(utimensat(AT_FDCWD, c, later, 0), 0, "c is changed");
+    ASSERT_EQ(hook_stat(c, &sb), 0, "stat c");
+    ASSERT_EQ(sb.st_nlink, 1, "a changed copy shows a link count of 1");
+    ASSERT_TRUE(sb.st_ino != plain.st_ino, "and its own inode");
+
+    // After the app restarts (every process maps the table anew), a still is
+    hl_reset_for_test();
+    ASSERT_EQ(hook_stat(a, &sa), 0, "stat a");
+    ASSERT_EQ(sa.st_nlink, 2, "the link of a is still known");
+
+    // A table of another format is started again
+    hl_reset_for_test();
+    fd = open(table, O_WRONLY);
+    ASSERT_TRUE(fd >= 0, "open the table");
+    uint32_t other = 99;
+    ASSERT_EQ(pwrite(fd, &other, sizeof(other), 4), (ssize_t)sizeof(other), "write another version");
+    close(fd);
+    ASSERT_EQ(hardlinks_maybe_any(), 0, "readers ignore a table of another version");
+    hl_reset_for_test();
+    ASSERT_EQ(cortex_emulate_hardlink(a, b), 0, "link a -> b");
+    ASSERT_EQ(hook_stat(b, &sb), 0, "stat b");
+    ASSERT_EQ(sb.st_nlink, 2, "a writer starts the table again");
+
+    hl_reset_for_test();
+    rm_rf(root);
+    cortex_set_root(saved_root, saved_len);
 }
 
 /* 9c. DNS servers of both families, queries and replies (the hook's own resolver) */
@@ -1187,6 +1345,105 @@ static void test_rewrite_path_matches_reference(void) {
 }
 
 /* 11. Helpers of the path translation and the bin <-> usr/bin retry */
+/* A session's child, started with vfork(): controlling terminal, only 0-2 open, cwd, environment,
+ * default signals, and the next program when the first cannot be executed. */
+static void test_spawn_in_pty(void) {
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    ASSERT_TRUE(master >= 0, "posix_openpt");
+    ASSERT_EQ(grantpt(master), 0, "grantpt");
+    ASSERT_EQ(unlockpt(master), 0, "unlockpt");
+    char slave[64];
+    ASSERT_EQ(ptsname_r(master, slave, sizeof(slave)), 0, "ptsname_r");
+    int extra = dup2(2, 701); /* an app descriptor that must not reach the shell */
+    ASSERT_EQ(extra, 701, "dup2 to 701");
+    signal(SIGPIPE, SIG_IGN);  /* the app ignores SIGPIPE; the shell must not inherit that */
+
+    char *const argv[] = { "sh", "-c",
+        "echo TTY=$(tty); echo FDS=$(ls /proc/$$/fd | tr '\\n' ' '); echo PWD=$(pwd); echo FOO=$FOO; "
+        "echo SIGPIPE=$(grep SigIgn /proc/$$/status | cut -f2)", NULL };
+    char *const envp[] = { "FOO=bar", "PATH=/usr/bin:/bin", NULL };
+    struct pty_spawn spawn;
+    memset(&spawn, 0, sizeof(spawn));
+    spawn.slave_name = slave;
+    spawn.cwd = "/tmp";
+    spawn.notice = "notice first\n";
+    struct pty_exec missing = { "/nonexistent/cortex-shell", argv, envp, "Cortex: failed to execute missing" };
+    struct pty_exec sh = { "/bin/sh", argv, envp, NULL };
+    spawn.exec[0] = missing;
+    spawn.exec[1] = sh;
+    spawn.max_fd = 4096;
+
+    pid_t pid = spawn_in_pty(&spawn);
+    ASSERT_TRUE(pid > 0, "spawn_in_pty starts the child");
+    close(extra);
+    signal(SIGPIPE, SIG_DFL);
+
+    char out[4096];
+    size_t len = 0;
+    for (;;) {
+        ssize_t n = read(master, out + len, sizeof(out) - 1 - len);
+        if (n <= 0) break; /* EIO once the child is gone */
+        len += (size_t)n;
+        if (len >= sizeof(out) - 1) break;
+    }
+    out[len] = '\0';
+    int status = 0;
+    ASSERT_EQ(waitpid(pid, &status, 0), pid, "waitpid");
+    close(master);
+
+    ASSERT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the shell exits with 0");
+    ASSERT_TRUE(strstr(out, "notice first") != NULL, "the notice is written first");
+    ASSERT_TRUE(strstr(out, "failed to execute missing (error 2)") != NULL, "a failing program is reported with its error");
+    ASSERT_TRUE(strstr(out, "TTY=/dev/pts/") != NULL, "the terminal is the controlling tty of stdin");
+    ASSERT_TRUE(strstr(out, "FDS=0 1 2 ") != NULL || strstr(out, "FDS=0 1 2 255 ") != NULL,
+                "only 0, 1 and 2 are open (bash may add 255)");
+    ASSERT_TRUE(strstr(out, "701") == NULL, "the app's descriptor 701 is closed");
+    ASSERT_TRUE(strstr(out, "PWD=/tmp") != NULL, "the working directory is set");
+    ASSERT_TRUE(strstr(out, "FOO=bar") != NULL, "the environment is passed");
+    ASSERT_TRUE(strstr(out, "SIGPIPE=0000000000000000") != NULL, "no signal is ignored in the shell");
+}
+
+/* lstat() of a link reads it again only when the hook rewrites what readlink() returns */
+static void test_readlink_result_may_change(void) {
+    char saved[PATH_MAX];
+    size_t saved_len = g_cortex_root_len;
+    memcpy(saved, g_cortex_root, sizeof(saved));
+    snprintf(g_cortex_root, sizeof(g_cortex_root), "%s", "/data/user/0/org.cortex.terminal/files/cortex");
+    g_cortex_root_len = strlen(g_cortex_root);
+
+    ASSERT_EQ(readlink_result_may_change("/bin", 7), 0, "bin -> usr/bin is reported as it is");
+    ASSERT_EQ(readlink_result_may_change("/usr/bin/awk", 21), 1, "an absolute link may point into the rootfs path");
+    ASSERT_EQ(readlink_result_may_change("/usr/bin/awk", (long long)g_cortex_root_len), 1, "a link as long as the rootfs path");
+    ASSERT_EQ(readlink_result_may_change("/usr/bin/x", 14), 0, "shorter than ../alternatives and the rootfs path");
+    ASSERT_EQ(readlink_result_may_change("/etc/foo/x", 15), 1, "../alternatives from next to /etc/alternatives may be normalized");
+    ASSERT_EQ(readlink_result_may_change("/usr/bin/x", 19), 1, "../etc/alternatives may be normalized");
+    ASSERT_EQ(readlink_result_may_change("/etc/alternatives/awk", 2), 1, "any ../ link in /etc/alternatives");
+    ASSERT_EQ(readlink_result_may_change("/etc/alternatives/awk", 1), 0, "a one-character target cannot start with ..");
+    ASSERT_EQ(readlink_result_may_change("relative/link", 30), 0, "relative link paths are only stripped of the rootfs");
+    ASSERT_EQ(readlink_result_may_change("relative/link", 60), 1, "a long target of a relative path may hold the rootfs");
+
+    /* the rule agrees with postprocess_readlink on every short target */
+    const char *targets[] = { "usr/bin", "../lib", "mawk", "/bin/sh", "../../etc/x", "../etc/alternatives/awk",
+                              "../alternatives", "../alternatives/vi" };
+    const char *links[] = { "/bin", "/usr/bin/awk", "/etc/alternatives/awk", "/etc/foo/x", "rel" };
+    for (size_t t = 0; t < sizeof(targets) / sizeof(targets[0]); t++) {
+        for (size_t l = 0; l < sizeof(links) / sizeof(links[0]); l++) {
+            char buf[PATH_MAX];
+            size_t len = strlen(targets[t]);
+            memcpy(buf, targets[t], len + 1);
+            ssize_t out = postprocess_readlink(links[l], buf, (ssize_t)len, sizeof(buf));
+            int changed = out != (ssize_t)len || memcmp(buf, targets[t], len) != 0;
+            if (changed) {
+                ASSERT_EQ(readlink_result_may_change(links[l], (long long)len), 1,
+                          "a target postprocess_readlink changes is always read");
+            }
+        }
+    }
+
+    memcpy(g_cortex_root, saved, sizeof(saved));
+    g_cortex_root_len = saved_len;
+}
+
 static void test_path_helpers(void) {
     /* cortex_append truncates exactly like snprintf */
     const char *pieces[] = { "", "a", "abc", "0123456789" };
@@ -1483,11 +1740,15 @@ int main(void) {
     test_sigsys_and_close_fds();
     test_hardlink_emulation_and_st_nlink();
     test_emulated_hardlink_groups();
+    test_emulated_hardlink_original_removed();
+    test_emulated_hardlinks_shared();
     test_dns_helpers();
     test_static_syscall_patching();
     test_absolutize_exec_path();
     test_rewrite_path_matches_reference();
     test_path_helpers();
+    test_readlink_result_may_change();
+    test_spawn_in_pty();
     test_exec_probe();
     test_exec_argv();
     test_find_dynamic_linker_for_machine();

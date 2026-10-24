@@ -3,16 +3,28 @@
 # starts the app, waits for Ubuntu to be unpacked, types a command into the terminal that runs
 # tests/e2e/in-terminal.sh, and collects its results, logcat and screenshots.
 #
-#     run-emulator-test.sh APK_DIR OUT_DIR
+#     run-emulator-test.sh APK_DIR OUT_DIR [ABI]
 #
-# Needs adb, gcc and a running emulator with adb root (a "google_apis" image). The app's arm64
-# Ubuntu runs on an x86_64 emulator through the image's ARM translation, which must also run ARM
-# programs started from a shell (binfmt_misc). They are started through emu-runner.c, which keeps
-# Cortex's LD_PRELOAD and LD_LIBRARY_PATH away from the translator (see there).
+# ABI is the APK to test: arm64-v8a (the default) or armeabi-v7a. Needs adb, gcc and a running
+# emulator with adb root (a "google_apis" image). The app's ARM Ubuntu runs on an x86_64 emulator
+# through the image's ARM translation, which must also run ARM programs started from a shell
+# (binfmt_misc). They are started through emu-runner.c, which keeps Cortex's LD_PRELOAD and
+# LD_LIBRARY_PATH away from the translator (see there).
 set -u
 
 APK_DIR="$1"
 OUT="$2"
+ABI="${3:-arm64-v8a}"
+# RUN_UBUNTU: whether the emulator's translator runs Ubuntu's programs. Android 11's translator of
+# 32-bit ARM code (the only one there is) stops every program of Ubuntu's armhf glibc that sets a
+# signal handler, bash first of all ("Unknown Thumb sa_restorer in guest sigaction!": glibc's signal
+# return code is Thumb code it does not know). Phones run the code themselves. On the emulator the
+# 32-bit APK is tested as far as an installed and set-up Ubuntu (check_unpacked_system).
+case "$ABI" in
+    arm64-v8a) BINFMT_NAME=arm64 DPKG_ARCH=arm64 RUN_UBUNTU=1 ;;
+    armeabi-v7a) BINFMT_NAME=arm DPKG_ARCH=armhf RUN_UBUNTU=0 ;;
+    *) echo "unknown ABI $ABI" >&2; exit 2 ;;
+esac
 DEVICE_OUT=/sdcard/Download/cortex-e2e
 mkdir -p "$OUT/screens"
 
@@ -73,6 +85,40 @@ wait_for() { # wait_for SECONDS COMMAND...: retries COMMAND every 5 s until it s
     done
 }
 
+pass_or_fail() { # pass_or_fail DESCRIPTION COMMAND...: a PASS or FAIL line; a failure sets status
+    local what="$1"
+    shift
+    if "$@"; then
+        echo "PASS $what"
+    else
+        echo "FAIL $what"
+        status=1
+    fi
+}
+version_is() { [ "$(sh_ cat "$DATA/files/cortex/.cortex_version")" = "$1" ]; }
+app_runs() { [ -n "$(sh_ pidof "$PKG")" ]; }
+app_is_32bit() { sh_ "readlink /proc/\$(pidof -s $PKG)/exe" | grep -q app_process32; }
+
+# ELF_FILE ELF_CLASS MACHINE: the file is an ELF file of that class (01: 32-bit) and machine (28: ARM)
+elf_is() {
+    set -- "$1" "$2" "$3" $(sh_ "od -An -tx1 -N20 $1" | tr -s ' \n' ' ')
+    [ "$4$5$6$7" = 7f454c46 ] && [ "$8" = "$2" ] && [ "${22}" = "$3" ]
+}
+
+# The 32-bit APK, where the emulator does not run Ubuntu's programs (see RUN_UBUNTU): the app's
+# process is a 32-bit one, and the unpacked and set-up system is the armhf one.
+check_unpacked_system() {
+    local root="$DATA/files/cortex" f
+    pass_or_fail "the app runs as a 32-bit process" app_is_32bit
+    pass_or_fail "bash is a 32-bit ARM program" elf_is "$root/usr/bin/bash" 01 28
+    pass_or_fail "the hook library is the 32-bit ARM one" elf_is "$root/usr/lib/libcortex-hook.so" 01 28
+    for f in usr/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3 usr/lib/arm-linux-gnueabihf/libc.so.6 \
+        usr/local/bin/apt etc/resolv.conf etc/passwd var/lib/dpkg/status home/.bashrc; do
+        pass_or_fail "/$f is set up" run_ test -e "$root/$f"
+    done
+    pass_or_fail "the packages are armhf ones" run_ "grep -q '^Architecture: armhf' $root/var/lib/dpkg/status"
+}
+
 log "Emulator"
 adb wait-for-device
 sh_ getprop | grep -E 'ro.product.cpu.abilist|native.bridge|ro.build.version.(sdk|release)|ro.product.model' | tee "$OUT/device.txt"
@@ -85,19 +131,19 @@ adb wait-for-device
 sh_ cmd overlay enable com.android.internal.systemui.navbar.threebutton || true
 sh_ settings put secure show_ime_with_hard_keyboard 0 || true
 
-sh_ getprop ro.product.cpu.abilist | grep -q arm64-v8a ||
-    die "this image cannot run arm64 apps (no ARM translation): $(sh_ getprop ro.product.cpu.abilist)"
+sh_ getprop ro.product.cpu.abilist | tr ',' '\n' | grep -qx "$ABI" ||
+    die "this image cannot run $ABI apps (no ARM translation): $(sh_ getprop ro.product.cpu.abilist)"
 
 # ARM programs started with exec() (bash, apt, ...) go through binfmt_misc to the translator.
 binfmt=/proc/sys/fs/binfmt_misc
-if ! sh_ ls "$binfmt" 2>/dev/null | grep -q arm64; then
+if ! sh_ ls "$binfmt" 2>/dev/null | grep -qx "${BINFMT_NAME}_dyn"; then
     log "Registering ARM programs with binfmt_misc"
     sh_ ls -l /system/bin | grep -iE 'ndk_translation|houdini' || true
     sh_ ls -l /system/etc/binfmt_misc 2>/dev/null || true
     sh_ setprop ro.enable.native.bridge.exec 1 2>/dev/null || true
     sh_ setprop ro.enable.native.bridge.exec64 1 2>/dev/null || true
     sleep 2
-    if ! sh_ ls "$binfmt" 2>/dev/null | grep -q arm64; then
+    if ! sh_ ls "$binfmt" 2>/dev/null | grep -qx "${BINFMT_NAME}_dyn"; then
         sh_ "mountpoint -q $binfmt || mount -t binfmt_misc binfmt_misc $binfmt" || true
         for f in $(sh_ ls /system/etc/binfmt_misc 2>/dev/null); do
             sh_ "cat /system/etc/binfmt_misc/$f > $binfmt/register" || true
@@ -111,8 +157,8 @@ for f in $(sh_ ls "$binfmt" | grep -E '^arm'); do
 done | tee -a "$OUT/binfmt_misc.txt"
 
 log "Installing the app"
-APK=$(ls "$APK_DIR"/*arm64-v8a*.apk 2>/dev/null | head -n 1)
-[ -n "$APK" ] || die "no arm64-v8a APK in $APK_DIR"
+APK=$(ls "$APK_DIR"/*"$ABI"*.apk 2>/dev/null | head -n 1)
+[ -n "$APK" ] || die "no $ABI APK in $APK_DIR"
 adb install -r -g "$APK" || die "the APK did not install"
 PKG=$(sh_ pm list packages org.cortex.terminal | sed 's/^package://' | head -n 1)
 [ -n "$PKG" ] || die "the app is not installed"
@@ -121,9 +167,9 @@ DATA=/data/data/$PKG
 # Android 11+ asks for "all files access" at start; the test grants it beforehand.
 sh_ appops set --uid "$PKG" MANAGE_EXTERNAL_STORAGE allow 2>/dev/null || true
 
-log "Starting arm64 programs through cortex-emu-runner"
+log "Starting $ABI programs through cortex-emu-runner"
 # The image's own runner, which cortex-emu-runner hands the programs to
-translator=$(sh_ cat /proc/sys/fs/binfmt_misc/arm64_dyn | sed -n 's/^interpreter //p')
+translator=$(sh_ cat "/proc/sys/fs/binfmt_misc/${BINFMT_NAME}_dyn" | sed -n 's/^interpreter //p')
 [ -n "$translator" ] || die "the image registers no ARM translator with binfmt_misc"
 echo "translator: $translator"
 gcc -static -nostdlib -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns -fno-stack-protector \
@@ -132,8 +178,8 @@ gcc -static -nostdlib -ffreestanding -fno-builtin -fno-tree-loop-distribute-patt
 adb push "$OUT/cortex-emu-runner" /data/local/tmp/cortex-emu-runner >/dev/null &&
     adb push tests/e2e/use-emu-runner.sh /data/local/tmp/use-emu-runner.sh >/dev/null ||
     die "cannot copy cortex-emu-runner"
-sh_ sh /data/local/tmp/use-emu-runner.sh "$PKG" /data/local/tmp/cortex-emu-runner | tee -a "$OUT/binfmt_misc.txt"
-sh_ cat /proc/sys/fs/binfmt_misc/arm64_dyn | grep -q cortex-emu-runner || die "cortex-emu-runner is not registered"
+sh_ sh /data/local/tmp/use-emu-runner.sh "$PKG" /data/local/tmp/cortex-emu-runner "$BINFMT_NAME" | tee -a "$OUT/binfmt_misc.txt"
+sh_ cat "/proc/sys/fs/binfmt_misc/${BINFMT_NAME}_dyn" | grep -q cortex-emu-runner || die "cortex-emu-runner is not registered"
 sh_ rm -rf "$DEVICE_OUT"
 adb push tests/e2e/in-terminal.sh /sdcard/Download/cortex-e2e.sh >/dev/null || die "cannot copy the test script"
 
@@ -152,13 +198,19 @@ log "Ubuntu unpacked after $((SECONDS - STARTED)) s"
 sleep 15
 shot "02-terminal"
 
-log "Running the tests in the terminal"
 size=$(sh_ wm size | sed -n 's/.*: \([0-9]*\)x\([0-9]*\)$/\1 \2/p' | tail -n 1)
 WIDTH=${size% *}
 HEIGHT=${size#* }
+status=0
+
+if [ "$RUN_UBUNTU" = 0 ]; then
+    log "The installed system (the emulator does not run $ABI programs of Ubuntu)"
+    check_unpacked_system
+else
+log "Running the tests in the terminal"
 tap_center "$WIDTH" "$HEIGHT"
 sleep 2
-TEST_COMMAND="CORTEX_E2E_EMULATOR=1 bash /sdcard/Download/cortex-e2e.sh"
+TEST_COMMAND="CORTEX_E2E_EMULATOR=1 CORTEX_E2E_ARCH=$DPKG_ARCH bash /sdcard/Download/cortex-e2e.sh"
 type_line "$TEST_COMMAND"
 if ! wait_for 90 run_ test -d "$DEVICE_OUT/started"; then
     shot "03-not-started"
@@ -186,8 +238,10 @@ log "Results"
 cat "$OUT/cortex-e2e/results.txt"
 cat "$OUT/cortex-e2e/done"
 
-status=0
-grep -q '^FAIL' "$OUT/cortex-e2e/results.txt" && status=1
+if grep -q '^FAIL' "$OUT/cortex-e2e/results.txt"; then
+    status=1
+    diagnose
+fi
 notifications=$(sh_ dumpsys notification --noredact)
 for title in "Cortex e2e notification" "Cortex e2e notify-send"; do
     if printf '%s\n' "$notifications" | grep -F -q "$title"; then
@@ -237,6 +291,7 @@ if tap_id btnDrawerSettings; then
 else
     log "no settings button found"
 fi
+fi # RUN_UBUNTU
 
 log "Restart"
 # Cortex again in a new process, as after Android stopped it: the normal start of an installed system,
@@ -247,14 +302,13 @@ run_ am force-stop "$PKG"
 sleep 3
 sh_ am start -W -n "$PKG/org.cortex.terminal.MainActivity" | tee "$OUT/restart.txt"
 sleep 10
-tap_center "$WIDTH" "$HEIGHT"
-sleep 2
-type_line "id -u > $DEVICE_OUT/after-restart.txt"
-if wait_for 90 run_ test -s "$DEVICE_OUT/after-restart.txt"; then
-    echo "PASS a session works after a restart"
+if [ "$RUN_UBUNTU" = 1 ]; then
+    tap_center "$WIDTH" "$HEIGHT"
+    sleep 2
+    type_line "id -u > $DEVICE_OUT/after-restart.txt"
+    pass_or_fail "a session works after a restart" wait_for 90 run_ test -s "$DEVICE_OUT/after-restart.txt"
 else
-    echo "FAIL no working session after a restart"
-    status=1
+    pass_or_fail "the app runs after a restart" app_runs
 fi
 shot "16-after-restart"
 sleep 20 # the background checks of the start
@@ -268,16 +322,13 @@ run_ am force-stop "$PKG"
 sleep 3
 sh_ am start -W -n "$PKG/org.cortex.terminal.MainActivity" | tee "$OUT/update-start.txt"
 sleep 15
-tap_center "$WIDTH" "$HEIGHT"
-sleep 2
-type_line "id -u > $DEVICE_OUT/after-update.txt"
-if wait_for 120 run_ test -s "$DEVICE_OUT/after-update.txt"; then
-    echo "PASS a session works after an update"
-else
-    echo "FAIL no working session after an update"
-    status=1
+if [ "$RUN_UBUNTU" = 1 ]; then
+    tap_center "$WIDTH" "$HEIGHT"
+    sleep 2
+    type_line "id -u > $DEVICE_OUT/after-update.txt"
+    pass_or_fail "a session works after an update" wait_for 120 run_ test -s "$DEVICE_OUT/after-update.txt"
 fi
-if [ "$(sh_ cat "$DATA/files/cortex/.cortex_version")" = "$current_version" ]; then
+if wait_for 120 version_is "$current_version"; then
     echo "PASS the update marked the system as current ($current_version)"
 else
     echo "FAIL the system is still marked as $(sh_ cat "$DATA/files/cortex/.cortex_version")"
@@ -309,9 +360,23 @@ fi
     grep -E "TotalTime|WaitTime" "$OUT/restart.txt"
     echo "start after an update:"
     grep -E "TotalTime|WaitTime" "$OUT/update-start.txt"
-    grep -E "Displayed $PKG|Base system (installed|updated)|Start-up maintenance took|ensureCaCertificates|Skipped [0-9]+ frames" "$OUT/logcat.txt" |
-        grep -E "$PKG|BootstrapManager|MainActivity|Choreographer" | sed 's/^/  /'
+    grep -E "Displayed $PKG|Base system (installed|updated)|Start-up maintenance took|Session process [0-9]+ started|ensureCaCertificates|Skipped [0-9]+ frames" "$OUT/logcat.txt" |
+        grep -E "$PKG|BootstrapManager|MainActivity|CortexPty|Choreographer" | sed 's/^/  /'
 } | tee "$OUT/timings.txt"
+
+# The same figures for timing-trend.sh, one KEY=VALUE per line (empty when missing)
+first_number() { grep -oE "$1" "$2" 2>/dev/null | head -n 1 | grep -oE '[0-9]+' | head -n 1; }
+{
+    echo "first_start_ms=$(first_number 'TotalTime: [0-9]+' "$OUT/first-start.txt")"
+    echo "extract_ms=$(first_number 'Extracted the base system in [0-9]+' "$OUT/logcat.txt")"
+    echo "install_ms=$(first_number 'Base system installed in [0-9]+' "$OUT/logcat.txt")"
+    echo "restart_ms=$(first_number 'TotalTime: [0-9]+' "$OUT/restart.txt")"
+    echo "maintenance_ms=$(first_number 'Start-up maintenance took [0-9]+' "$OUT/logcat.txt")"
+    echo "update_start_ms=$(first_number 'TotalTime: [0-9]+' "$OUT/update-start.txt")"
+    echo "update_ms=$(first_number 'Base system updated in [0-9]+' "$OUT/logcat.txt")"
+    echo "session_start_us=$(grep -oE 'Session process [0-9]+ started in [0-9]+' "$OUT/logcat.txt" | head -n 1 | grep -oE '[0-9]+$')"
+} > "$OUT/timings.env"
+cat "$OUT/timings.env"
 
 log "Took $((SECONDS - STARTED)) s"
 exit $status

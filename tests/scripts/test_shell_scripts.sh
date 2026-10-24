@@ -27,7 +27,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "=== 0. Checking LF line endings and syntax ==="
-for script_name in reload.sh service.sh systemctl.sh su.sh cortex-shell.sh cortex-backup.sh cortex-api.sh notify-send.sh; do
+for script_name in reload.sh service.sh systemctl.sh su.sh cortex-shell.sh cortex-backup.sh cortex-api.sh notify-send.sh apt-autoupdate.sh; do
     script_path="$ASSETS_SCRIPTS/$script_name"
     if LC_ALL=C grep -q $'\r' "$script_path"; then
         fail "$script_name contains CRLF line endings"
@@ -349,12 +349,74 @@ ERR="$(CORTEX_API_CONF="$API_DIR/missing" bash "$API_SH" battery 2>&1 </dev/null
 [ "$STATUS" = 1 ] && echo "$ERR" | grep -q "Cortex is not running" && pass "a missing /run/cortex-api says Cortex is not running" || fail "missing conf: $STATUS '$ERR'"
 api --help | grep -q "notification \[-t TITLE\]" && pass "cortex-api --help works without the app" || fail "cortex-api --help"
 
+# A descriptor that is open stays as it is (the ARM translator of x86 devices keeps its memory file at
+# 3): the cat that prints the answer still finds the caller's file there
+mkdir -p "$API_DIR/fdcheck"
+printf '#!/bin/bash\nreadlink /proc/self/fd/3 > "%s"\nexec "%s" "$@"\n' "$API_DIR/fd3" "$(command -v cat)" > "$API_DIR/fdcheck/cat"
+chmod +x "$API_DIR/fdcheck/cat"
+OUT="$(CORTEX_API_CONF="$API_CONF" PATH="$API_DIR/fdcheck:$PATH" bash "$API_SH" battery 3<"$API_SH" </dev/null)"
+[ "$OUT" = "ok battery" ] && [ "$(cat "$API_DIR/fd3")" = "$(realpath "$API_SH")" ] \
+    && pass "cortex-api leaves descriptor 3 alone" || fail "cortex-api descriptor 3: output '$OUT', fd 3 was '$(cat "$API_DIR/fd3" 2>/dev/null)'"
+
 cp "$API_SH" "$API_DIR/bin/cortex-api" && chmod +x "$API_DIR/bin/cortex-api"
 CORTEX_API_CONF="$API_CONF" PATH="$API_DIR/bin:$PATH" bash "$ASSETS_SCRIPTS/notify-send.sh" -u critical -t 5000 -i dialog-information "Derleme bitti" "0 hata" </dev/null
 [ "$?" = 0 ] && [ "$(last args)" = '["-t", "Derleme bitti", "-c", "0 hata"]' ] && pass "notify-send shows SUMMARY and BODY through cortex-api" || fail "notify-send: $(last args)"
 CORTEX_API_CONF="$API_CONF" PATH="$API_DIR/bin:$PATH" bash "$ASSETS_SCRIPTS/notify-send.sh" </dev/null 2>/dev/null
 [ "$?" = 1 ] && pass "notify-send without a summary fails" || fail "notify-send without a summary did not fail"
 kill "$API_PID" 2>/dev/null; wait "$API_PID" 2>/dev/null
+
+echo "=== 3c. Testing apt-autoupdate.sh (apt and apt-get without package lists) ==="
+APT_T="$TEST_TMP/apt-auto"
+mkdir -p "$APT_T/bin" "$APT_T/lists/partial" "$APT_T/local"
+for tool in apt apt-get; do
+    # stand-ins that record how they were called
+    printf '#!/bin/bash\necho "%s $*" >> "%s/calls"\nif [ "$1" = update ]; then : > "%s/lists/ports_noble_main_binary-arm64_Packages.lz4"; fi\nexit "${FAKE_STATUS:-0}"\n' \
+        "$tool" "$APT_T" "$APT_T" > "$APT_T/bin/$tool"
+    chmod +x "$APT_T/bin/$tool"
+    cp "$ASSETS_SCRIPTS/apt-autoupdate.sh" "$APT_T/local/$tool"
+    chmod +x "$APT_T/local/$tool"
+done
+apt_auto() { CORTEX_APT_BIN="$APT_T/bin" CORTEX_APT_LISTS="$APT_T/lists" "$APT_T/local/$1" "${@:2}"; }
+: > "$APT_T/calls"
+msg=$(apt_auto apt-get -y install hello 2>&1 >/dev/null)
+if [ "$(cat "$APT_T/calls")" = "$(printf 'apt-get update\napt-get -y install hello')" ]; then
+    pass "apt-get install without package lists runs apt-get update first"
+else
+    fail "apt-get install without lists: calls were '$(cat "$APT_T/calls" | tr '\n' '|')'"
+fi
+case "$msg" in *"package lists are empty"*) pass "it says why it updates" ;; *) fail "no message: '$msg'" ;; esac
+: > "$APT_T/calls"
+apt_auto apt install curl >/dev/null 2>&1
+if [ "$(cat "$APT_T/calls")" = "apt install curl" ]; then
+    pass "with package lists apt install runs directly"
+else
+    fail "with lists: calls were '$(cat "$APT_T/calls" | tr '\n' '|')'"
+fi
+rm -f "$APT_T/lists/"*_Packages*
+: > "$APT_T/calls"
+apt_auto apt list --installed >/dev/null 2>&1
+apt_auto apt-get -o Debug::X=1 clean >/dev/null 2>&1
+if [ "$(cat "$APT_T/calls")" = "$(printf 'apt list --installed\napt-get -o Debug::X=1 clean')" ]; then
+    pass "commands that need no package lists never update"
+else
+    fail "commands without lists: calls were '$(cat "$APT_T/calls" | tr '\n' '|')'"
+fi
+: > "$APT_T/calls"
+FAKE_STATUS=7 apt_auto apt-get install x >/dev/null 2>&1
+status=$?
+if [ "$status" = 7 ] && [ "$(cat "$APT_T/calls")" = "apt-get update" ]; then
+    pass "a failing update stops the command with its status"
+else
+    fail "failing update: status $status, calls '$(cat "$APT_T/calls" | tr '\n' '|')'"
+fi
+rm -f "$APT_T/lists/"*_Packages*
+FAKE_STATUS=3 apt_auto apt-get remove x >/dev/null 2>&1
+status=$?
+if [ "$status" = 3 ]; then
+    pass "the real program's status is passed on"
+else
+    fail "status of the real program: $status"
+fi
 
 echo "=== 4. Testing simple xdg-open script ==="
 XDG_OPEN_TEST="$TEST_TMP/xdg-open"
@@ -558,13 +620,39 @@ else
 fi
 
 echo "=== 9b. Checking the emulator test scripts ==="
-for e2e_script in run-emulator-test.sh in-terminal.sh diagnose.sh use-emu-runner.sh; do
+for e2e_script in run-emulator-test.sh in-terminal.sh diagnose.sh use-emu-runner.sh timing-trend.sh; do
     if bash -n "$REPO_ROOT/tests/e2e/$e2e_script" 2>/dev/null; then
         pass "$e2e_script passes bash -n syntax check"
     else
         fail "$e2e_script failed bash -n syntax check"
     fi
 done
+TREND_T="$TEST_TMP/trend"
+mkdir -p "$TREND_T"
+for v in 1000 1200 1100; do
+    printf 'first_start_ms=%s\nrestart_ms=900\n' "$v" > "$TREND_T/t.env"
+    bash "$REPO_ROOT/tests/e2e/timing-trend.sh" "$TREND_T/t.env" "$TREND_T/h/timings.csv" "run$v" >/dev/null 2>&1
+done
+printf 'first_start_ms=2000\nrestart_ms=800\ninstall_ms=4000\n' > "$TREND_T/t.env"
+trend_out=$(bash "$REPO_ROOT/tests/e2e/timing-trend.sh" "$TREND_T/t.env" "$TREND_T/h/timings.csv" now 2>"$TREND_T/err")
+trend_status=$?
+if [ "$trend_status" = 0 ] && printf '%s\n' "$trend_out" | grep -qF '| first_start_ms | 2000 | 1100 | +82% |' &&
+    printf '%s\n' "$trend_out" | grep -qF '| restart_ms | 800 | 900 | -11% |' &&
+    printf '%s\n' "$trend_out" | grep -qF '| install_ms | 4000 | - | - |'; then
+    pass "timing-trend.sh compares a run with the median of the earlier ones"
+else
+    fail "timing-trend.sh table: $trend_out"
+fi
+if grep -q '::warning::first_start_ms' "$TREND_T/err" && ! grep -q 'restart_ms' "$TREND_T/err"; then
+    pass "timing-trend.sh warns only about figures 50% above the median"
+else
+    fail "timing-trend.sh warnings: $(cat "$TREND_T/err")"
+fi
+if [ "$(tail -n 1 "$TREND_T/h/timings.csv")" = "now,2000,,4000,800,,,," ] && [ "$(wc -l < "$TREND_T/h/timings.csv")" = 5 ]; then
+    pass "timing-trend.sh adds the run to the history"
+else
+    fail "timing-trend.sh history: $(tail -n 2 "$TREND_T/h/timings.csv" | tr '\n' '|')"
+fi
 
 echo "=== 9. Checking the benchmark runner ==="
 if bash -n "$REPO_ROOT/tests/bench/run-micro.sh" 2>/dev/null; then

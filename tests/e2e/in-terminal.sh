@@ -60,7 +60,7 @@ echo "Cortex end-to-end test"
 
 # The system
 check os-release grep -q 'VERSION_ID="24.04"' /etc/os-release
-expect dpkg-arch arm64 dpkg --print-architecture
+expect dpkg-arch "${CORTEX_E2E_ARCH:-arm64}" dpkg --print-architecture
 expect id-root "uid=0(root)" id
 expect bash-arrays ok bash -c 'declare -A m=([a]=ok); echo "${m[a]}"'
 expect pipes 100000 bash -c 'seq 1 100000 | sort -rn | head -n 1'
@@ -72,8 +72,8 @@ check files bash -xc '
     d=$(mktemp -d) && cd "$d" &&
     echo one > a && mv a b && ln -s b s && [ "$(readlink s)" = b ] && [ "$(cat s)" = one ] &&
     mkfifo p && [ -p p ] && rm -rf "$d"'
-# Hard links are copies that show the link count and inode of a real link to the process that made
-# them (so ln and a later stat, two processes, do not see it): link() and stat() in one perl.
+# Hard links are copies that show the link count and inode of a real link: link() and stat() in one
+# perl, then ln and stat, separate processes that share the table of emulated links.
 hard_links() {
     local d
     d=$(mktemp -d) && cd "$d" && echo one > a &&
@@ -83,12 +83,28 @@ hard_links() {
 }
 export -f hard_links
 expect hard-links "links=2 same inode" hard_links
+# (what stat and perl see is printed, so that a failure shows which part differs)
+hard_links_between_processes() {
+    local d linked removed same=different
+    d=$(mktemp -d) && cd "$d" && echo one > a && ln a b || return 1
+    stat -c '%n: links %h, inode %i, device %d, modified %y' a b
+    perl -e 'for (@ARGV) { my @s = stat($_); print "$_ (perl): links $s[3], inode $s[1], device $s[0], modified $s[9]\n" }' a b
+    ls -l /var/lib/cortex/hardlinks
+    linked=$(stat -c %h a)
+    [ "$(stat -c %i a)" = "$(stat -c %i b)" ] && same=same
+    rm b && removed=$(stat -c %h a)
+    cd / && rm -rf "$d"
+    echo "links $linked then $removed, $same inode"
+}
+export -f hard_links_between_processes
+expect hard-links-shared "links 2 then 1, same inode" hard_links_between_processes
 check sha256sum bash -c 'echo hi | sha256sum | grep -q ^98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4'
 check shared-storage bash -c 'echo hi > "$0/written-by-ubuntu.txt" && [ "$(cat "$0/written-by-ubuntu.txt")" = hi ]' "$OUT"
 
-# Packages from Ubuntu's archive
+# Packages from Ubuntu's archive. The app comes without package lists: the first install runs
+# "apt-get update" by itself (/usr/local/bin/apt-get).
+expect apt-install "package lists are empty" apt-get install -y --no-install-recommends hello python3-minimal
 check apt-update apt-get update
-check apt-install apt-get install -y --no-install-recommends hello python3-minimal
 expect hello "Hello, world!" hello
 expect python3 "4" python3 -c 'print(2 + 2)'
 
@@ -101,6 +117,7 @@ expect api-clipboard e2e-clip bash -c 'echo e2e-clip | cortex-api clipboard-set 
 check api-toast cortex-api toast "Hello from Ubuntu"
 expect api-wakelock on bash -c 'cortex-api wakelock on >/dev/null && cortex-api wakelock status; s=$?; cortex-api wakelock off >/dev/null; exit $s'
 expect api-bad-command "unknown command" bash -c 'cortex-api no-such-command; [ $? = 1 ]'
+expect api-mirror "https://" cortex-api mirror show
 
 echo "passed=$passed failed=$failed" > "$OUT/done"
 echo

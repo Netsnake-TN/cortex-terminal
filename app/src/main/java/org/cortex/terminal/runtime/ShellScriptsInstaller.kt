@@ -55,6 +55,9 @@ object ShellScriptsInstaller {
             val loaded = loadAssetScript(context, "reload.sh", fallbackScript)
             val reloadScript = if (loaded.contains("return 0")) loaded else fallbackScript
 
+            // ~/.local/bin is made later in the same start (ensureEssentialBinaries); made here, the
+            // first start installs the same files as every later one.
+            File(home, ".local/bin").mkdirs()
             val reloadDirs = listOf(File(root, "usr/bin"), File(root, "bin"), File(home, ".local/bin"))
             reloadDirs.forEach { dir ->
                 if (dir.exists()) {
@@ -248,6 +251,27 @@ object ShellScriptsInstaller {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to ensure browser opener", e)
+        }
+    }
+
+    /**
+     * Installs apt-autoupdate.sh as /usr/local/bin/apt and apt-get, ahead of Ubuntu's in PATH: Cortex's
+     * Ubuntu comes without package lists, so the first "apt install" runs "apt-get update" first.
+     * Without the script (a build without it) nothing is installed.
+     */
+    fun ensureAptAutoUpdate(root: File, context: Context?) {
+        val script = try {
+            context?.assets?.open("scripts/apt-autoupdate.sh")?.bufferedReader()?.use { it.readText() }
+        } catch (e: Exception) {
+            null
+        } ?: return
+        val localBin = File(root, "usr/local/bin")
+        for (name in listOf("apt", "apt-get")) {
+            try {
+                FileInstaller.install(File(localBin, name), script, 493) // 0755
+            } catch (e: Exception) {
+                Log.e(TAG, "Skipping $name install: ${e.message}")
+            }
         }
     }
 
