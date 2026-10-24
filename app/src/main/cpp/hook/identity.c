@@ -24,6 +24,14 @@ int getgroups(int size, gid_t list[]) {
     if (size > 0 && list != NULL) list[0] = 0;
     return 1;
 }
+// What programs built with _FORTIFY_SOURCE call when the buffer's size is known (the check is
+// glibc's): without it the count came from the hook (1) and the list from the kernel (the app's
+// groups, more than one), and sshd ended the login on "getgroups: Invalid argument"
+extern void __chk_fail(void) __attribute__((__noreturn__));
+int __getgroups_chk(int size, gid_t list[], size_t listlen) {
+    if (size > 0 && (size_t)size * sizeof(gid_t) > listlen) __chk_fail();
+    return getgroups(size, list);
+}
 int setgroups(size_t size, const gid_t *list) { (void)size; (void)list; return 0; }
 int initgroups(const char *user, gid_t group) { (void)user; (void)group; return 0; }
 
@@ -89,7 +97,7 @@ int hook_linkat(int olddirfd, const char *oldpath, int newdirfd, const char *new
 
 int hook_stat(const char *path, struct stat *st) {
     int ret = stat(path, st);
-    if (ret == 0) apply_emulated_hardlink(st);
+    if (ret == 0) apply_stat_emulation(st);
     return ret;
 }
 
@@ -601,6 +609,18 @@ int CORTEX_NSS_SYM(getgrnam_r)(const char *name, struct group *grp, char *buf, s
     return (err == ERANGE) ? ERANGE : 0;
 }
 
+// sshd's privilege-separated user is root's ids: Cortex cannot drop privileges (setuid() and
+// setgid() only pretend to), and sshd's unprivileged part checks after dropping them that it cannot
+// take them back, which ended it ("permanently_set_uid: was able to restore old [e]gid"). Like apt's
+// sandbox user (APT::Sandbox::User "root"), it then runs as the rest does.
+static struct passwd *present_privsep_user_as_root(struct passwd *pwd) {
+    if (pwd && pwd->pw_name && strcmp(pwd->pw_name, "sshd") == 0) {
+        pwd->pw_uid = 0;
+        pwd->pw_gid = 0;
+    }
+    return pwd;
+}
+
 struct passwd *CORTEX_NSS_SYM(getpwuid)(uid_t uid) {
 #ifndef CORTEX_HOST_TEST
     static struct passwd *(*orig_getpwuid)(uid_t) = NULL;
@@ -619,11 +639,11 @@ struct passwd *CORTEX_NSS_SYM(getpwnam)(const char *name) {
     static struct passwd *(*orig_getpwnam)(const char *) = NULL;
     if (!orig_getpwnam) orig_getpwnam = (struct passwd *(*)(const char *))dlsym(RTLD_NEXT, "getpwnam");
     struct passwd *res = orig_getpwnam ? orig_getpwnam(name) : NULL;
-    if (res) return res;
+    if (res) return present_privsep_user_as_root(res);
 #endif
 
     int err = cortex_lookup_passwd(name, 0, 1, &s_pwd_storage, s_pwd_buf, sizeof(s_pwd_buf));
-    if (err == 0) return &s_pwd_storage;
+    if (err == 0) return present_privsep_user_as_root(&s_pwd_storage);
     return NULL;
 }
 
@@ -660,7 +680,10 @@ int CORTEX_NSS_SYM(getpwnam_r)(const char *name, struct passwd *pwd, char *buf, 
     int ret = g_test_orig_nss_r_ret;
     if (result) *result = (ret == 0 && g_test_orig_nss_r_found) ? pwd : NULL;
 #endif
-    if (ret == 0 && result && *result != NULL) return 0;
+    if (ret == 0 && result && *result != NULL) {
+        present_privsep_user_as_root(*result);
+        return 0;
+    }
     if (ret != 0 && ret != ENOENT) {
         if (result) *result = NULL;
         return ret;
@@ -668,6 +691,7 @@ int CORTEX_NSS_SYM(getpwnam_r)(const char *name, struct passwd *pwd, char *buf, 
 
     int err = cortex_lookup_passwd(name, 0, 1, pwd, buf, buflen);
     if (err == 0) {
+        present_privsep_user_as_root(pwd);
         if (result) *result = pwd;
         return 0;
     }

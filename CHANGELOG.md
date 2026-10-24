@@ -4,6 +4,76 @@ What changed in each version of Cortex Terminal, newest first. The release workf
 of a GitHub release from the section of its version here. Older versions are described on the
 [GitHub releases](https://github.com/ssfuisu/cortex/releases) page.
 
+## 1.26.38 (2026-10-24)
+
+### New
+
+- **Sessions come back.** When Android ends Cortex (to free memory, or for an update of the app),
+  its sessions are there again at the next start: as many as there were, the one that was shown,
+  each in its folder and with the end of its output, dimmed. The programs that ran in them have
+  stopped and start anew. Leaving Cortex with Exit closes them for good; Settings > Sessions turns
+  it off.
+- **Your own keys above the keyboard.** `~/.cortex/keys` sets the rows (up to 4) and keys (up to 12
+  a row): names such as `ESC`, `CTRL`, `UP`, `F5` or `PASTE`, symbols such as `|` and `~`, and text
+  such as `gs="git status\n"`. Cortex uses the file as soon as it is saved and says what is wrong
+  with one it cannot use; `~/.cortex/keys.example` explains it and has the keys as they are now.
+  The keys F1 to F12 are new, and CTRL then an arrow key moves by words (`CSI 1;5D`, as xterm sends
+  it).
+- **Text size with two fingers**: spreading or pinching them on the terminal changes it; Cortex
+  keeps the size.
+- **An SSH server in one step.** Settings > Remote access > Start the SSH server (or `cortex-sshd`)
+  installs Ubuntu's OpenSSH the first time, starts it on port 8022 and shows how to connect from a
+  computer. `cortex-sshd key 'ssh-ed25519 ...'` lets a computer's key in, `cortex-sshd enable`
+  starts the server with Cortex every time, `cortex-sshd stop` ends it.
+- **Local web servers in the notifications.** When a program in Cortex serves web pages
+  (`npm run dev`, `python3 -m http.server`, Jupyter...), a notification opens them in the browser
+  or copies their address, and goes away when the server stops. Settings > Notifications &
+  Clipboard turns it off.
+- **Backups with the installed packages.** `cortex-backup` also keeps the list of the packages
+  installed with apt and the apt sources of other vendors (such as NodeSource); `cortex-backup
+  restore` installs the missing ones again after asking (`--no-packages` leaves them out,
+  `cortex-backup packages` does it later).
+- `cortex-api network` lists the phone's addresses, which `ip` and `ifconfig` cannot get from
+  Android.
+
+### Improved
+
+- **A smaller app that unpacks faster**: Ubuntu's files are compressed with Zstandard, which the
+  app decompresses itself, on a thread of its own, while it unpacks them. The APK is 31 MB instead
+  of 40.5 MB (arm64-v8a) and 29 MB instead of 37.9 MB (armeabi-v7a).
+
+### Fixed
+
+- **git works in your repositories**: it refused them with "detected dubious ownership".
+  Programs in Cortex run as root, but the files they made showed the app's own user as their owner;
+  now they show root, as `ls -l` already did by name. This also lets `tmux` start (its socket
+  directory had "unsafe permissions"), `ssh` read `~/.ssh/config` ("Bad owner") and the SSH server
+  start.
+- Servers that take connections with `accept()` (OpenSSH's among them) get them: the call is made
+  as `accept4()`, the one Android's seccomp filter is made for. On the emulator it answered with a
+  descriptor that did not exist.
+- sshd's privilege-separated user has root's ids, as apt's sandbox user is root: Cortex cannot drop
+  privileges, and sshd ended each connection when it found it could take them back.
+- Programs built with `_FORTIFY_SOURCE` (all of Ubuntu's) get the hook's answer from `getgroups()`
+  and `recvfrom()` too: their checked variants went past it, and sshd ended each login on
+  "getgroups: Invalid argument".
+- On x86 devices and emulators, which run Cortex through Android's ARM translator, programs that
+  close all their descriptors (sshd does at start) no longer close the translator's own memory file
+  with them, and limits that leave a process no new descriptors or file writes (sandboxes such as
+  sshd's set them before login) are not applied: the translator aborted in sshd's processes.
+
+### For developers
+
+- The GitHub Actions run on Node 24 and are pinned to commits; Dependabot keeps them current.
+- The emulator test also runs on Google's 16 KB page size image of Android 15 (without the checks
+  that install packages: its ARM translator spins forever in apt's first update), checks the
+  restored session, the SSH login with a key, the web server notification and that the files
+  Cortex makes are root's. Its adb commands have time limits, so that a stuck emulator ends the
+  test at its timeout.
+- A nightly run installs about 30 popular packages (Python, Node.js, gcc, Rust, Go, Java, git,
+  PostgreSQL, Redis, nginx...) in the latest release on the emulator and shows which work in its
+  job summary.
+
 ## 1.26.37 (2026-10-24)
 
 ### New

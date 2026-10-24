@@ -27,6 +27,8 @@
 #include <time.h>
 #include <elf.h>
 #include <dirent.h>
+#include <pthread.h>
+#include "zstd/zstd.h"
 
 static char **clean_env_for_system(char *const envp[], int envCount) {
     char **new_env = malloc(sizeof(char *) * (envCount + 1));
@@ -896,10 +898,185 @@ static int parse_pax_headers(const char *buf, size_t len,
 
 #define TAR_COPY_BUF_SIZE 65536
 
-// Extracts the tar stream read from fd (a file or a pipe, which is not closed) into dest_dir.
+// What the extractor reads: a tar stream, or one compressed with zstd (the bootstrap archive is a
+// .tar.zst). The first four bytes tell which. A compressed one is decompressed by a thread of its
+// own into a pipe that the extractor reads, so that decompressing and writing the files go on side
+// by side (as the APK's inflate beside the extractor did before).
+typedef struct {
+    int fd;              // the tar stream: the fd given, or the read end of the decoder's pipe
+    unsigned char head[4];
+    size_t head_pos, head_len;
+    int compressed;
+    int in_fd;           // what the decoder reads
+    int pipe_w;          // and where it writes, closed by it when it is done
+    pthread_t decoder;
+    int decoder_running; // until joined
+    int decoded;         // the decoder's result: 0 when the stream was complete and undamaged
+} tar_source;
+
+static int write_full(int fd, const void *buf, size_t count) {
+    const unsigned char *p = (const unsigned char *)buf;
+    while (count > 0) {
+        ssize_t n = write(fd, p, count);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        p += n;
+        count -= (size_t)n;
+    }
+    return 0;
+}
+
+// Decompresses the zstd stream that starts with head (its first bytes, already read) and goes on in
+// in_fd into out_fd. 0 when it ended with a complete frame and every frame's checksum matched; -1
+// on a read, write or decompression error, or when it ends inside a frame.
+static int zstd_decompress_fd(int in_fd, const unsigned char *head, size_t head_len, int out_fd) {
+    ZSTD_DStream *zstd = ZSTD_createDStream();
+    size_t in_cap = ZSTD_DStreamInSize(), out_cap = ZSTD_DStreamOutSize();
+    unsigned char *in = malloc(in_cap), *out = malloc(out_cap);
+    int res = -1;
+    if (!zstd || !in || !out || in_cap < head_len) goto done;
+    ZSTD_initDStream(zstd);
+    memcpy(in, head, head_len);
+    size_t in_len = head_len;
+    size_t frame_left = 0; // ZSTD_decompressStream's last answer: 0 at the end of a frame
+    while (in_len > 0) {
+        ZSTD_inBuffer in_buf = { in, in_len, 0 };
+        int more;
+        do {
+            ZSTD_outBuffer out_buf = { out, out_cap, 0 };
+            size_t in_before = in_buf.pos;
+            size_t ret = ZSTD_decompressStream(zstd, &out_buf, &in_buf);
+            if (ZSTD_isError(ret)) {
+                LOGE("The archive cannot be decompressed (zstd error %d)", (int)ZSTD_getErrorCode(ret));
+                goto done;
+            }
+            // A call that neither read nor made anything answers that it expects a new frame: only
+            // the others tell whether the last frame is complete
+            if (in_buf.pos != in_before || out_buf.pos > 0) frame_left = ret;
+            // An error here: the extractor stopped and closed its end
+            if (out_buf.pos > 0 && write_full(out_fd, out, out_buf.pos) != 0) goto done;
+            // A full output buffer: zstd may have more of what it read
+            more = out_buf.pos == out_buf.size;
+        } while (in_buf.pos < in_buf.size || more);
+        ssize_t n;
+        do {
+            n = read(in_fd, in, in_cap);
+        } while (n < 0 && errno == EINTR);
+        if (n < 0) goto done;
+        in_len = (size_t)n;
+    }
+    if (frame_left != 0) {
+        LOGE("The compressed archive ends too early");
+        goto done;
+    }
+    res = 0;
+done:
+    if (zstd) ZSTD_freeDStream(zstd);
+    free(in);
+    free(out);
+    return res;
+}
+
+static void *tar_decoder_main(void *arg) {
+    tar_source *src = (tar_source *)arg;
+    // A write after the extractor stopped fails with EPIPE instead of ending the app
+    sigset_t pipe_signal;
+    sigemptyset(&pipe_signal);
+    sigaddset(&pipe_signal, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipe_signal, NULL);
+    src->decoded = zstd_decompress_fd(src->in_fd, src->head, src->head_len, src->pipe_w);
+    // The extractor reads the end of the stream
+    close(src->pipe_w);
+    return NULL;
+}
+
+static int tar_source_open(tar_source *src, int fd) {
+    memset(src, 0, sizeof(*src));
+    src->fd = fd;
+    src->in_fd = -1;
+    src->pipe_w = -1;
+    ssize_t n = read_full(fd, src->head, sizeof(src->head));
+    if (n < 0) return -1;
+    src->head_len = (size_t)n;
+    if (n != 4 || src->head[0] != 0x28 || src->head[1] != 0xB5 || src->head[2] != 0x2F || src->head[3] != 0xFD) return 0;
+    int p[2];
+    if (pipe2(p, O_CLOEXEC) != 0) return -1;
+#ifdef F_SETPIPE_SZ
+    // Fewer turns of the two threads (Android lets apps have pipes of up to 1 MB)
+    fcntl(p[1], F_SETPIPE_SZ, 1 << 20);
+#endif
+    src->compressed = 1;
+    src->in_fd = fd;
+    src->fd = p[0];
+    src->pipe_w = p[1];
+    if (pthread_create(&src->decoder, NULL, tar_decoder_main, src) != 0) {
+        LOGE("Cannot start the thread that decompresses the archive");
+        close(p[1]);
+        src->pipe_w = -1;
+        return -1;
+    }
+    src->decoder_running = 1;
+    return 0;
+}
+
+static void tar_source_close(tar_source *src) {
+    if (!src->compressed) return;
+    // A decoder that is not done yet stops at its next write
+    if (src->fd >= 0) close(src->fd);
+    src->fd = -1;
+    if (src->decoder_running) pthread_join(src->decoder, NULL);
+    src->decoder_running = 0;
+}
+
+// Like read_full: count bytes, fewer only at the end, -1 on a read error.
+static ssize_t tar_source_read(tar_source *src, void *buf, size_t count) {
+    unsigned char *p = (unsigned char *)buf;
+    size_t total = 0;
+    // A plain tar's first bytes (a compressed stream's are the decoder's)
+    if (!src->compressed) {
+        while (total < count && src->head_pos < src->head_len) p[total++] = src->head[src->head_pos++];
+    }
+    if (total == count) return (ssize_t)total;
+    ssize_t n = read_full(src->fd, p + total, count - total);
+    return n < 0 ? -1 : (ssize_t)(total + (size_t)n);
+}
+
+// After the archive's end marker, a compressed stream is decompressed to its end: zstd stores data
+// that does not compress as it is, which only the frame's checksum at the end covers, and it checks
+// that only when it gets there. 0 when the stream is complete and undamaged.
+static int tar_source_finish(tar_source *src) {
+    if (!src->compressed) return 0;
+    char rest[4096];
+    ssize_t n;
+    do {
+        n = read(src->fd, rest, sizeof(rest));
+    } while (n > 0 || (n < 0 && errno == EINTR));
+    if (n < 0) return -1;
+    // The decoder closed its end: it is done
+    pthread_join(src->decoder, NULL);
+    src->decoder_running = 0;
+    return src->decoded;
+}
+
+static int extract_tar_source(tar_source *src, const char *dest_dir);
+
+// Extracts the tar stream (or zstd-compressed tar stream) read from fd (a file or a pipe, which is
+// not closed) into dest_dir.
 static int extract_tar_fd(int fd, const char *dest_dir) {
     if (fd < 0 || !dest_dir) return -1;
+    tar_source src;
+    int res = tar_source_open(&src, fd) == 0 ? extract_tar_source(&src, dest_dir) : -1;
+    if (res == 0 && tar_source_finish(&src) != 0) {
+        LOGE("The compressed archive is damaged");
+        res = -1;
+    }
+    tar_source_close(&src);
+    return res;
+}
 
+static int extract_tar_source(tar_source *src, const char *dest_dir) {
     char *copy_buf = malloc(TAR_COPY_BUF_SIZE);
     if (!copy_buf) {
         return -1;
@@ -915,7 +1092,7 @@ static int extract_tar_fd(int fd, const char *dest_dir) {
     int has_pax_size = 0;
 
     for (;;) {
-        ssize_t hdr_n = read_full(fd, block, 512);
+        ssize_t hdr_n = tar_source_read(src, block, 512);
         if (hdr_n == 0) break;
         if (hdr_n != 512) {
             free(copy_buf);
@@ -956,7 +1133,7 @@ static int extract_tar_fd(int fd, const char *dest_dir) {
             size_t pos = 0;
             while (padded > 0) {
                 char dblock[512];
-                if (read_full(fd, dblock, 512) != 512) {
+                if (tar_source_read(src, dblock, 512) != 512) {
                     free(copy_buf);
                     return -1;
                 }
@@ -983,7 +1160,7 @@ static int extract_tar_fd(int fd, const char *dest_dir) {
                 free(copy_buf);
                 return -1;
             }
-            if (read_full(fd, pax_buf, (size_t)padded) != (ssize_t)padded) {
+            if (tar_source_read(src, pax_buf, (size_t)padded) != (ssize_t)padded) {
                 free(pax_buf);
                 free(copy_buf);
                 return -1;
@@ -1052,7 +1229,7 @@ static int extract_tar_fd(int fd, const char *dest_dir) {
             unsigned long long padded = ((size + 511ULL) / 512ULL) * 512ULL;
             while (padded > 0) {
                 size_t to_read = (padded < TAR_COPY_BUF_SIZE) ? (size_t)padded : TAR_COPY_BUF_SIZE;
-                if (read_full(fd, copy_buf, to_read) != (ssize_t)to_read) {
+                if (tar_source_read(src, copy_buf, to_read) != (ssize_t)to_read) {
                     free(copy_buf);
                     return -1;
                 }
@@ -1172,7 +1349,7 @@ static int extract_tar_fd(int fd, const char *dest_dir) {
 
             while (total_to_read > 0) {
                 size_t to_read = (total_to_read < TAR_COPY_BUF_SIZE) ? (size_t)total_to_read : TAR_COPY_BUF_SIZE;
-                if (read_full(fd, copy_buf, to_read) != (ssize_t)to_read) {
+                if (tar_source_read(src, copy_buf, to_read) != (ssize_t)to_read) {
                     close(out_fd);
                     free(copy_buf);
                     return -1;

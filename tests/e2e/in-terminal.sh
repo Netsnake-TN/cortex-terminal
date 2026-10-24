@@ -51,6 +51,11 @@ expect() {
     cat /etc/os-release
     id
     dpkg --print-architecture
+    echo "page size: $(getconf PAGESIZE)"
+    # What a program sees of itself: on an x86 device or emulator the ARM translator's own memory
+    # file is among its descriptors (the hook keeps it open, privileged.c)
+    echo "/proc/self/exe: $(readlink /proc/self/exe)"
+    ls -l /proc/self/fd/ 2>&1 | sed -n '2,12p'
     df -h / 2>/dev/null
     LD_SHOW_AUXV=1 /bin/true | grep -E "AT_HWCAP|AT_PLATFORM"
     grep -m 1 -i features /proc/cpuinfo
@@ -98,15 +103,30 @@ hard_links_between_processes() {
 }
 export -f hard_links_between_processes
 expect hard-links-shared "links 2 then 1, same inode" hard_links_between_processes
+# The files Cortex makes are root's, the user programs run as (test -O compares the owner with geteuid())
+check own-files bash -c 'f=$(mktemp) && [ -O "$f" ] && [ -G "$f" ] && [ "$(stat -c %u:%g "$f")" = 0:0 ]; s=$?; rm -f "$f"; exit $s'
 check sha256sum bash -c 'echo hi | sha256sum | grep -q ^98ea6e4f216f2fb4b69fff9b3a44842c38686ca685f3f55dc48c5d3fb1107be4'
 check shared-storage bash -c 'echo hi > "$0/written-by-ubuntu.txt" && [ "$(cat "$0/written-by-ubuntu.txt")" = hi ]' "$OUT"
 
+# skip NAME WHY: a check left out
+skip() {
+    echo "SKIP $1: $2" >> "$RESULTS"
+    printf '\033[33m-\033[0m %s\n' "$1"
+}
+# Without packages (E2E_NO_APT, the 16 KB image: its translator spins forever in apt's signature
+# check of the package lists)
+NO_APT="${CORTEX_E2E_NO_APT:-}"
+
 # Packages from Ubuntu's archive. The app comes without package lists: the first install runs
 # "apt-get update" by itself (/usr/local/bin/apt-get).
-expect apt-install "package lists are empty" apt-get install -y --no-install-recommends hello python3-minimal
-check apt-update apt-get update
-expect hello "Hello, world!" hello
-expect python3 "4" python3 -c 'print(2 + 2)'
+if [ -z "$NO_APT" ]; then
+    expect apt-install "package lists are empty" apt-get install -y --no-install-recommends hello python3-minimal
+    check apt-update apt-get update
+    expect hello "Hello, world!" hello
+    expect python3 "4" python3 -c 'print(2 + 2)'
+else
+    for name in apt-install apt-update hello python3; do skip "$name" "no packages on this emulator"; done
+fi
 
 # cortex-api
 expect api-info '"app"' cortex-api info
@@ -118,6 +138,37 @@ check api-toast cortex-api toast "Hello from Ubuntu"
 expect api-wakelock on bash -c 'cortex-api wakelock on >/dev/null && cortex-api wakelock status; s=$?; cortex-api wakelock off >/dev/null; exit $s'
 expect api-bad-command "unknown command" bash -c 'cortex-api no-such-command; [ $? = 1 ]'
 expect api-mirror "https://" cortex-api mirror show
+expect api-network " " cortex-api network
+
+# Ubuntu's OpenSSH server (cortex-sshd installs it the first time), and a login with a key
+ssh_login() {
+    cortex-sshd start || return 1
+    rm -f ~/.ssh/e2e ~/.ssh/e2e.pub
+    ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/e2e || return 1
+    cortex-sshd key < ~/.ssh/e2e.pub || return 1
+    local out s
+    out="$(timeout 60 ssh -p 8022 -i ~/.ssh/e2e -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null root@127.0.0.1 'echo ssh-login-ok as $(id -un) in $PWD' 2>&1)"
+    s=$?
+    echo "$out"
+    cortex-sshd stop
+    [ "$s" = 0 ] || { echo "--- sshd log"; tail -n 40 ~/.cortex/sshd.log; return 1; }
+}
+export -f ssh_login
+if [ -z "$NO_APT" ]; then
+    expect ssh-server "ssh-login-ok as root" ssh_login
+else
+    skip ssh-server "openssh-server is a package"
+fi
+
+# A web server for the notification about it, which run-emulator-test.sh looks for (perl-base is
+# part of every Ubuntu system); it answers for three minutes
+perl -MIO::Socket::INET -e '
+    my $s = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => 8642, Listen => 5, ReuseAddr => 1) or die "$!";
+    $SIG{ALRM} = sub { exit 0 };
+    alarm 180;
+    while (my $c = $s->accept) { <$c>; print $c "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\ncortex e2e\n"; close $c }
+' > "$OUT/web-server.txt" 2>&1 &
 
 echo "passed=$passed failed=$failed" > "$OUT/done"
 echo
