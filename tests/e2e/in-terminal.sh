@@ -117,6 +117,44 @@ skip() {
 # check of the package lists)
 NO_APT="${CORTEX_E2E_NO_APT:-}"
 
+# A Go program built without cgo (all of Ubuntu's Go programs, and the single files downloaded from a
+# project's releases) makes its own system calls, so the hook is never loaded into it: Cortex adds
+# code to its file that maps Ubuntu's paths and starts programs through the hook (hook/go_programs.c).
+# tests/go/gotest in its "ubuntu" mode asks for what Go programs ask first.
+GO_PROGRAM=/sdcard/Download/cortex-e2e-gotest
+if [ -f "$GO_PROGRAM" ] && [ "$(dpkg --print-architecture)" = arm64 ]; then
+    cp "$GO_PROGRAM" ~/gotest && chmod 755 ~/gotest
+    # The control: the program as it was built (CORTEX_NO_GOSYS=1 adds nothing to it), which tells
+    # whether this device (an emulator's translator) runs Go programs at all
+    go_control=$(CORTEX_NO_GOSYS=1 timeout 180 ~/gotest ubuntu 2>&1)
+    control_status=$?
+    printf '%s\n' "$go_control" > "$OUT/log-go-control.txt"
+    go_out=$(timeout 180 ~/gotest ubuntu 2>&1)
+    go_status=$?
+    printf '%s\n' "$go_out" > "$OUT/log-go-program.txt"
+    if ! printf '%s' "$go_control" | grep -q '^os-release='; then
+        # The program does not run even as built: that says nothing about the patch
+        skip go-program "the program does not run here as it was built (status $control_status; with the patch: $go_status)"
+    else
+        check go-runs-as-built grep -q '^os-release=' "$OUT/log-go-control.txt"
+        expect go-os-release 'os-release=PRETTY_NAME="Ubuntu' echo "$go_out"
+        expect go-passwd "passwd-root=true" echo "$go_out"
+        expect go-resolv-conf "resolv-conf=true" echo "$go_out"
+        expect go-bash "stat-bash=true" echo "$go_out"
+        expect go-zoneinfo "stat-zoneinfo=true" echo "$go_out"
+        expect go-getwd "getwd=/etc" echo "$go_out"
+        expect go-exec "exec-uname=aarch64 exit=0" echo "$go_out"
+        expect go-exec-env "exec-env=hi exit=0" echo "$go_out"
+        expect go-exec-status "exec-sh=/bin/sh exit=3" echo "$go_out"
+        if getent hosts archive.ubuntu.com >/dev/null 2>&1; then
+            expect go-dns "dns=true" echo "$go_out"
+            expect go-https "https=200" echo "$go_out"
+        else
+            skip go-dns "no network here"
+        fi
+    fi
+fi
+
 # Packages from Ubuntu's archive. The app comes without package lists: the first install runs
 # "apt-get update" by itself (/usr/local/bin/apt-get).
 if [ -z "$NO_APT" ]; then

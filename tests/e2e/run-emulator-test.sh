@@ -16,6 +16,7 @@
 #   E2E_PAGE_SIZE=BYTES    the page size the emulator must have (the 16 KB image)
 #   E2E_SKIP_WITHOUT_ABI=1 an image that cannot run the ABI's apps is a skip, not a failure
 #   E2E_NO_APT=1           the checks that install packages (apt, the SSH server) are left out
+#   E2E_GO_PROGRAM=FILE    the static arm64 Go program of tests/go/gotest, for the checks of Go programs
 #
 # The app's ARM Ubuntu runs on an x86_64 emulator through the image's ARM translation, which must also run ARM programs started from a shell
 # (binfmt_misc). They are started through emu-runner.c, which keeps Cortex's LD_PRELOAD and
@@ -89,6 +90,18 @@ tap_id() {
     [ -n "$bounds" ] || return 1
     set -- $bounds
     sh_ input tap $((($1 + $3) / 2)) $((($2 + $4) / 2))
+}
+
+# Opens the drawer (a swipe from the left edge) and taps the view with this resource id in it. The
+# first swipe after the notification shade is closed is not always taken: up to three tries.
+drawer_tap() {
+    local try
+    for try in 1 2 3; do
+        sh_ input swipe 2 $((HEIGHT / 2)) $((WIDTH * 2 / 3)) $((HEIGHT / 2)) 300
+        sleep 2
+        tap_id "$1" && return 0
+    done
+    return 1
 }
 
 wait_for() { # wait_for SECONDS COMMAND...: retries COMMAND every 5 s until it succeeds
@@ -212,6 +225,9 @@ sh_ sh /data/local/tmp/use-emu-runner.sh "$PKG" /data/local/tmp/cortex-emu-runne
 sh_ cat "/proc/sys/fs/binfmt_misc/${BINFMT_NAME}_dyn" | grep -q cortex-emu-runner || die "cortex-emu-runner is not registered"
 sh_ rm -rf "$DEVICE_OUT"
 adb push "$E2E_SCRIPT" /sdcard/Download/cortex-e2e.sh >/dev/null || die "cannot copy the test script"
+if [ -n "${E2E_GO_PROGRAM:-}" ] && [ -f "$E2E_GO_PROGRAM" ]; then
+    adb push "$E2E_GO_PROGRAM" /sdcard/Download/cortex-e2e-gotest >/dev/null || log "cannot copy the Go program"
+fi
 
 adb logcat -c
 adb logcat -v time > "$OUT/logcat.txt" 2>&1 &
@@ -311,10 +327,11 @@ shot "11-notifications"
 sh_ cmd statusbar collapse
 sleep 2
 # A second session, then the session list in the drawer
-sh_ input swipe 2 $((HEIGHT / 2)) $((WIDTH * 2 / 3)) $((HEIGHT / 2)) 300
-sleep 2
-tap_id btnDrawerNewSession || log "no new-session button found"
+drawer_tap btnDrawerNewSession || log "no new-session button found"
 sleep 8
+# The sessions are kept in a file, one "session" line each
+pass_or_fail "a second session started" wait_for 30 run_ "test \$(grep -c '^session\$' $DATA/files/sessions) -ge 2"
+shot "12a-two-tabs"
 # A directory for this session, which it is to be in again after the restart
 run_line "mkdir -p ~/restore-test && cd ~/restore-test && clear"
 sh_ input swipe 2 $((HEIGHT / 2)) $((WIDTH * 2 / 3)) $((HEIGHT / 2)) 300
@@ -323,6 +340,18 @@ shot "12-sessions"
 if tap_id btnDrawerSettings; then
     sleep 3
     shot "13-settings"
+    # The color scheme picker (second entry of the first screen), closed again without a choice
+    sh_ input tap $((WIDTH / 2)) $((HEIGHT * 30 / 100))
+    sleep 2
+    shot "13a-theme-picker"
+    sh_ rm -f /sdcard/window.xml
+    sh_ uiautomator dump /sdcard/window.xml >/dev/null
+    if sh_ cat /sdcard/window.xml 2>/dev/null | grep -q 'id/parentPanel'; then
+        sh_ input keyevent 4 # the dialog; without one, back would leave the settings
+        sleep 1
+    else
+        log "the scheme picker did not open"
+    fi
     sh_ input swipe $((WIDTH / 2)) $((HEIGHT * 3 / 4)) $((WIDTH / 2)) $((HEIGHT / 4)) 500
     sleep 2
     shot "14-settings-more"
