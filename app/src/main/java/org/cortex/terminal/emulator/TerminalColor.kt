@@ -351,8 +351,13 @@ object TerminalColor {
     val ANSI_COLORS = IntArray(16)
     val COLOR_PALETTE = IntArray(256)
 
+    // The colors of the scheme that the cells of the sessions have been brought to (declared before
+    // the init block: properties and init blocks of an object run in the order they are written)
+    private var held = IntArray(18)
+
     init {
         applyTheme("catppuccin")
+        held = inUse()
     }
 
     fun rebuildPalette() {
@@ -372,6 +377,62 @@ object TerminalColor {
             val gray = 8 + i * 10
             COLOR_PALETTE[idx++] = Color.rgb(gray, gray, gray)
         }
+    }
+
+    /**
+     * What a change of scheme makes of the colors that cells hold. A cell keeps the color the scheme
+     * had when it was written (as a number, not as "the default"), so the screen and the scrollback
+     * of a session that was there before the change would go on showing the old scheme: its
+     * background came back as a block when the keyboard closed and the terminal grew into the rows
+     * it had hidden. Only the default and the 16 ANSI colors change with a scheme; the other 240 and
+     * the 24-bit ones are the same in all of them.
+     *
+     * A number does not say which of them it was: in Gruvbox the default background is also ANSI
+     * black and the default foreground ANSI white. The colors are therefore tried in the order that
+     * is likely for where the number is: as a foreground the default foreground, then the ANSI ones,
+     * the default background last (text in the color of the background would not be seen); as a
+     * background the default background, then the ANSI ones, the default foreground last. A cell
+     * that is ANSI black on Gruvbox's black background is still seen as the background, and a
+     * 24-bit color that equals one of them is changed with it.
+     */
+    class Remap internal constructor(
+        private val fgFrom: IntArray, private val fgTo: IntArray,
+        private val bgFrom: IntArray, private val bgTo: IntArray
+    ) {
+        fun mapFg(color: Int): Int {
+            for (i in fgFrom.indices) if (fgFrom[i] == color) return fgTo[i]
+            return color
+        }
+
+        fun mapBg(color: Int): Int {
+            for (i in bgFrom.indices) if (bgFrom[i] == color) return bgTo[i]
+            return color
+        }
+    }
+
+    // [0] the default foreground, [1] the default background, [2..17] the ANSI colors
+    private fun inUse() = intArrayOf(DEFAULT_FG, DEFAULT_BG, *ANSI_COLORS)
+
+    /**
+     * What to do with the cells of the sessions to bring them to the scheme in use, null when they are
+     * there. Whoever gets it does that at once for all sessions: the next answer starts from here. (The
+     * settings change the scheme in use for themselves, so the sessions are not told by a change.)
+     */
+    fun takeRemap(): Remap? {
+        val now = inUse()
+        if (now.indices.all { held[it] == now[it] }) {
+            held = now
+            return null
+        }
+        // The order of the colors, see Remap
+        val fgOrder = (listOf(0) + (2..17) + listOf(1)).filter { held[it] != now[it] }
+        val bgOrder = (listOf(1) + (2..17) + listOf(0)).filter { held[it] != now[it] }
+        val remap = Remap(
+            IntArray(fgOrder.size) { held[fgOrder[it]] }, IntArray(fgOrder.size) { now[fgOrder[it]] },
+            IntArray(bgOrder.size) { held[bgOrder[it]] }, IntArray(bgOrder.size) { now[bgOrder[it]] }
+        )
+        held = now
+        return remap
     }
 
     fun applyTheme(themeId: String) {

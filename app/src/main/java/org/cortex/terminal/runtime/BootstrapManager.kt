@@ -12,7 +12,7 @@ import java.util.zip.GZIPInputStream
 
 object BootstrapManager {
     private const val TAG = "BootstrapManager"
-    const val CURRENT_BOOTSTRAP_VERSION = 12639
+    const val CURRENT_BOOTSTRAP_VERSION = 12640
 
     fun initializeFileSystem(context: Context) {
         val root = Environment.getCortexRoot(context)
@@ -168,6 +168,9 @@ object BootstrapManager {
                 File(root, "var/lib/apt/lists/partial").listFiles()?.forEach { it.delete() }
             }
             ensureMachineId(root)
+            // The system users and groups (a package's scripts need them): before the installation is
+            // marked as current, so that a session that starts at once can install packages
+            ensurePasswd(root, Environment.getHomeDir(context))
             ensureEssentialBinaries(root, Environment.getHomeDir(context), context)
             ensureDynamicLinkerSymlinks(root)
             val versionFile = File(root, ".cortex_version")
@@ -997,6 +1000,13 @@ object BootstrapManager {
             if (!passwdText.contains("sshd:")) {
                 passwdText += "sshd:x:101:101:Privilege-separated SSH:/run/sshd:/usr/sbin/nologin\n"
             }
+            // The system users and groups every Ubuntu has (man, www-data, adm, tty...): packages'
+            // scripts use them, and an image that kept only root and cortex made redis, nginx and
+            // PostgreSQL fail to install
+            val baseDir = File(root, "usr/share/base-passwd")
+            fun master(name: String) = try { File(baseDir, name).takeIf { it.isFile }?.readText() ?: "" } catch (e: Exception) { "" }
+            val basePasswd = BaseUsers.mergePasswd(passwdText, master("passwd.master"))
+            passwdText = basePasswd.text
             FileInstaller.install(passwdFile, passwdText, 420) // 0644
 
             val groupFile = File(etcDir, "group")
@@ -1013,6 +1023,8 @@ object BootstrapManager {
             if (!groupText.contains("ssh:")) {
                 groupText += "ssh:x:101:\n"
             }
+            val baseGroup = BaseUsers.mergeGroup(groupText, master("group.master"))
+            groupText = baseGroup.text
             FileInstaller.install(groupFile, groupText, 420)
 
             val shadowFile = File(etcDir, "shadow")
@@ -1021,6 +1033,7 @@ object BootstrapManager {
             if (!shadowText.contains("cortex:")) shadowText += "cortex:*:19700:0:99999:7:::\n"
             if (!shadowText.contains("_ssh:")) shadowText += "_ssh:*:19700:0:99999:7:::\n"
             if (!shadowText.contains("sshd:")) shadowText += "sshd:*:19700:0:99999:7:::\n"
+            shadowText = BaseUsers.mergeShadow(shadowText, basePasswd.added, BaseUsers::shadowEntry)
             FileInstaller.install(shadowFile, shadowText, 420)
 
             val gshadowFile = File(etcDir, "gshadow")
@@ -1029,6 +1042,7 @@ object BootstrapManager {
             if (!gshadowText.contains("cortex:")) gshadowText += "cortex:*::\n"
             if (!gshadowText.contains("_ssh:")) gshadowText += "_ssh:*::\n"
             if (!gshadowText.contains("ssh:")) gshadowText += "ssh:*::\n"
+            gshadowText = BaseUsers.mergeShadow(gshadowText, baseGroup.added, BaseUsers::gshadowEntry)
             FileInstaller.install(gshadowFile, gshadowText, 420)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to ensure passwd/group", e)

@@ -20,6 +20,18 @@ if [ -n "${CORTEX_E2E_EMULATOR:-}" ]; then
         arm-sve arm-sve2 arm-sveaes arm-svepmull arm-svesha3 arm-svesm4 > /etc/gcrypt/hwf.deny
 fi
 
+# What the app's set-up left in the system (the profile scripts, apt and dpkg settings, users and
+# groups, the wrappers in /usr/local/bin): a small archive for the local test lab, which has none of
+# the app's own start-up steps. Nothing that holds a secret goes in it (no shadow files, none of
+# ~/.cortex but the keys bar), as the run's output is kept as an artifact.
+(cd / && tar -cf "$OUT/app-config.tar" --ignore-failed-read --exclude=etc/ssl --exclude=etc/ld.so.cache \
+    etc/profile etc/profile.d etc/bash.bashrc etc/apt etc/dpkg etc/passwd etc/group \
+    etc/hosts etc/resolv.conf etc/nsswitch.conf etc/environment etc/cortex etc/skel usr/local usr/sbin/policy-rc.d \
+    usr/sbin/ldconfig usr/sbin/start-stop-daemon usr/sbin/mandb usr/lib/locale/C.UTF-8 usr/lib/locale/en_US.UTF-8 \
+    var/lib/dpkg/status var/lib/cortex 2>/dev/null; cd "$HOME" && tar -rf "$OUT/app-config.tar" -C / --ignore-failed-read \
+    "$(printf '%s' "$HOME" | sed 's#^/##')/.bashrc" "$(printf '%s' "$HOME" | sed 's#^/##')/.profile" "$(printf '%s' "$HOME" | sed 's#^/##')/.bash_profile" \
+    "$(printf '%s' "$HOME" | sed 's#^/##')/.cortex/keys" "$(printf '%s' "$HOME" | sed 's#^/##')/.cortex/keys.example" 2>/dev/null) || true
+
 passed=0
 failed=0
 
@@ -68,6 +80,10 @@ check os-release grep -q 'VERSION_ID="24.04"' /etc/os-release
 expect dpkg-arch "${CORTEX_E2E_ARCH:-arm64}" dpkg --print-architecture
 expect id-root "uid=0(root)" id
 expect bash-arrays ok bash -c 'declare -A m=([a]=ok); echo "${m[a]}"'
+# The system users and groups every Ubuntu has (packages' scripts use them), and sudo as a guide types it
+expect base-users "man:x:6:12:" getent passwd man
+expect base-groups "adm:x:4:" getent group adm
+expect sudo ok sudo printf ok
 expect pipes 100000 bash -c 'seq 1 100000 | sort -rn | head -n 1'
 expect perl ok perl -e 'print "ok\n"'
 
