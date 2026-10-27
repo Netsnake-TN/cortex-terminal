@@ -126,3 +126,7 @@ static int is_handled_sigsys_syscall(int sys_nr) {
 #endif
     return 0;
 }
+
+int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
+    return accept4(sockfd, addr, addrlen, 0);
+}
