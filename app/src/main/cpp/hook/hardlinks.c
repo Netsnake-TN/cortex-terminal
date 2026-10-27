@@ -519,6 +519,7 @@ static int cortex_emulate_hardlinkat(int olddirfd, const char *rold, int newdirf
 #ifndef CORTEX_HOST_TEST
 
     int have_lst = 0;
+    struct stat lst;
     if (orig_fstatat) {
         if (orig_fstatat(newdirfd, rnew, &lst, AT_SYMLINK_NOFOLLOW) == 0) have_lst = 1;
     } else {
