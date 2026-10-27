@@ -1,0 +1,102 @@
+name: Build Debug APK
+
+on:
+  push:
+    branches:
+      - testing-debug-build
+  pull_request:
+    branches:
+      - testing-debug-build
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Debug APK
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: 17
+
+      - name: Setup Android SDK
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends unzip curl wget
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          cd $HOME/android-sdk/cmdline-tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q commandlinetools-linux-11076708_latest.zip -d latest
+          mv latest/cmdline-tools latest/
+          echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
+          yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$HOME/android-sdk "platform-tools" "platforms;android-35" "build-tools;35.0.2" >/dev/null 2>&1 || true
+
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME --licenses >/dev/null 2>&1 || true
+
+      - name: Cache Android NDK and CMake
+        uses: actions/cache@v4
+        with:
+          path: |
+            $ANDROID_HOME/ndk
+            $ANDROID_HOME/cmake
+          key: android-ndk-cmake-${{ hashFiles('**/build.gradle*') }}
+          restore-keys: |
+            android-ndk-cmake-
+
+      - name: Install Android NDK and CMake
+        run: |
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME "ndk;29.0.14206865" "cmake;3.22.1" >/dev/null 2>&1 || true
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> $GITHUB_ENV
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/29.0.14206865" >> $GITHUB_ENV
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - name: Make Gradle Wrapper Executable
+        run: chmod +x gradlew
+
+      - name: Cache cortex-hook Libraries
+        uses: actions/cache@v4
+        with:
+          path: hook-libs
+          key: cortex-hook-${{ hashFiles('app/src/main/cpp/cortex-hook.c', 'app/src/main/cpp/hook/**', 'app/src/main/cpp/gosys/**', 'scripts/build-gosys.sh', 'app/src/main/cpp/root/**', '.github/workflows/build-debug.yml') }}
+
+      - name: Build Glibc cortex-hook Libraries
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 -qq
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf libc6-dev-arm64-cross libc6-dev-armhf-cross dpkg-dev
+          mkdir -p hook-libs
+          scripts/build-gosys.sh
+          aarch64-linux-gnu-gcc -std=gnu11 -shared -fPIC -O3 -fno-delete-null-pointer-checks -Wall -Wno-nonnull-compare -Wl,-z,max-page-size=16384 -o hook-libs/libcortex-hook-arm64.so app/src/main/cpp/cortex-hook.c -ldl
+          arm-linux-gnueabihf-gcc -std=gnu11 -shared -fPIC -O3 -fno-delete-null-pointer-checks -Wall -Wno-nonnull-compare -Wl,-z,max-page-size=16384 -o hook-libs/libcortex-hook-arm.so app/src/main/cpp/cortex-hook.c -ldl
+          aarch64-linux-gnu-gcc -std=gnu11 -static -O2 -Wall -Wextra -Werror -Wl,-z,max-page-size=16384 -o hook-libs/cortex-chroot-arm64.elf app/src/main/cpp/root/cortex-chroot.c
+          arm-linux-gnueabihf-gcc -std=gnu11 -static -O2 -Wall -Wextra -Werror -Wl,-z,max-page-size=16384 -o hook-libs/cortex-chroot-arm.elf app/src/main/cpp/root/cortex-chroot.c
+
+      - name: Build cortex-redirect seccomp supervisor
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 -qq
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu file
+          bash cortex-redirect/build.sh
+
+      - name: Assemble Debug APK
+        run: |
+          ./gradlew assembleDebug --build-cache --parallel --stacktrace
+
+      - name: Upload Debug APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: cortex-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 3
