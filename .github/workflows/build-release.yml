@@ -328,6 +328,15 @@ jobs:
 
           ls -lh app/src/main/assets/
 
+      # Build cortex-redirect from source (no prebuilt binary shipped)
+      # and copy it into app/src/main/assets/ so Gradle embeds it in the APK.
+      - name: Build cortex-redirect seccomp supervisor
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 -qq
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu file
+          bash cortex-redirect/build.sh
+          ls -lh app/src/main/assets/cortex-redirect
+
       - name: Build C development overlays (libc6-dev and its dependencies)
         run: |
           set -euo pipefail
