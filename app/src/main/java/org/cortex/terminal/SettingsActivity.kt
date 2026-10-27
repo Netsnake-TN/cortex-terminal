@@ -42,6 +42,10 @@ class SettingsActivity : AppCompatActivity() {
         supportActionBar?.title = android.text.SpannableString(getString(R.string.settings_title)).apply {
             setSpan(android.text.style.ForegroundColorSpan(p.text), 0, length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
+        // The back arrow is the theme's own, white: on the light scheme it could not be seen
+        androidx.appcompat.content.res.AppCompatResources.getDrawable(this, R.drawable.ic_arrow_back)?.let {
+            supportActionBar?.setHomeAsUpIndicator(it.mutate().apply { setTint(p.text) })
+        }
         window.statusBarColor = p.bar
         window.navigationBarColor = p.bar
         val controller = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
@@ -75,13 +79,49 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     class SettingsFragment : PreferenceFragmentCompat() {
+        override fun onViewCreated(view: android.view.View, savedInstanceState: Bundle?) {
+            super.onViewCreated(view, savedInstanceState)
+            // The scheme's colors, like the rest of the app
+            SettingsStyle(this).install()
+        }
+
         override fun onDisplayPreferenceDialog(preference: Preference) {
-            // The color schemes are shown as they look
-            if (preference.key == "terminal_theme" && preference is ListPreference) {
-                ThemePicker.show(requireContext(), preference)
+            if (preference is ListPreference) {
+                // The color schemes are shown as they look
+                if (preference.key == "terminal_theme") ThemePicker.show(requireContext(), preference)
+                else showChoice(preference)
                 return
             }
             super.onDisplayPreferenceDialog(preference)
+        }
+
+        /** The choices of a list preference in a dialog of the interface's colors (the library's is a gray one). */
+        private fun showChoice(pref: ListPreference) {
+            val context = requireContext()
+            val entries = pref.entries ?: return
+            val values = pref.entryValues ?: return
+            val p = org.cortex.terminal.view.Chrome.palette
+            val checked = values.indexOfFirst { it.toString() == pref.value }
+            val adapter = object : android.widget.ArrayAdapter<CharSequence>(
+                context, android.R.layout.simple_list_item_single_choice, entries
+            ) {
+                override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
+                    val row = super.getView(position, convertView, parent) as android.widget.CheckedTextView
+                    row.setTextColor(p.text)
+                    row.checkMarkTintList = android.content.res.ColorStateList.valueOf(p.accent)
+                    return row
+                }
+            }
+            val dialog = androidx.appcompat.app.AlertDialog.Builder(context)
+                .setTitle(pref.dialogTitle ?: pref.title)
+                .setSingleChoiceItems(adapter, checked) { d, which ->
+                    val value = values[which].toString()
+                    if (pref.callChangeListener(value)) pref.value = value
+                    d.dismiss()
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .create()
+            org.cortex.terminal.view.ChromeDialog.style(dialog).show()
         }
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {

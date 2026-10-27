@@ -336,13 +336,47 @@ sleep 3
 shot "11-notifications"
 sh_ cmd statusbar collapse
 sleep 2
+# Characters of the supplementary planes that take one cell, in the columns a program counts them in:
+# the sextants (Kilo draws its logo with them, and the fonts of many phones lack them: the terminal
+# draws them itself), icons of the Nerd Fonts' Material set and a mathematical letter. Each row ends
+# with a bar at the same column.
+if python3 - > "$OUT/sextants.txt" <<'PYEOF'
+import sys
+all_sextants = "".join(chr(c) for c in range(0x1FB00, 0x1FB3C))
+kilo = chr(0x2588) + "".join(chr(c) for c in (0x1FB3A, 0x1FB0F, 0x1FB01, 0x1FB2C)) + chr(0x2588)
+rows = [
+    "sextants 60:",
+    all_sextants[:30] + "|",
+    all_sextants[30:] + "|",
+    "kilo:  " + kilo + "|",
+    "icons: " + chr(0xF0001) + chr(0xF0002) + chr(0x1D400) + "|",
+    "ruler: 123456|",
+]
+sys.stdout.buffer.write(("\n".join(rows) + "\n").encode("utf-8"))
+PYEOF
+then
+    sh_ mkdir -p "$DEVICE_OUT"
+    if adb push "$OUT/sextants.txt" "$DEVICE_OUT/sextants.txt" >/dev/null; then
+        run_line "clear; cat $DEVICE_OUT/sextants.txt" 3
+        shot "11a-sextants"
+        run_line "clear" 2
+    else
+        log "the sextants file was not pushed"
+    fi
+else
+    log "no python3 for the sextants file"
+fi
 # A second session, then the session list in the drawer
 drawer_tap btnDrawerNewSession || log "no new-session button found"
 sleep 8
 # The sessions are kept in a file, one "session" line each
 pass_or_fail "a second session started" wait_for 30 run_ "test \$(grep -c '^session\$' $DATA/files/sessions) -ge 2"
 shot "12a-two-tabs"
-# A directory for this session, which it is to be in again after the restart
+# A directory for this session, which it is to be in again after the restart. The terminal is
+# tapped first: after the drawer closes, the focus is not always in it yet (slow emulators), and the
+# Enter of the line then pressed the first tab and switched to session 1.
+tap_center "$WIDTH" "$HEIGHT"
+sleep 1
 run_line "mkdir -p ~/restore-test && cd ~/restore-test && clear"
 sh_ input swipe 2 $((HEIGHT / 2)) $((WIDTH * 2 / 3)) $((HEIGHT / 2)) 300
 sleep 2
@@ -368,6 +402,37 @@ if tap_id btnDrawerSettings; then
     sh_ input swipe $((WIDTH / 2)) $((HEIGHT * 3 / 4)) $((WIDTH / 2)) $((HEIGHT / 4)) 500
     sleep 2
     shot "15-settings-root-mode"
+    # The white scheme (second entry of the picker): the settings, the terminal and the drawer in it.
+    # It stays chosen for the rest of the run, which shows that it is kept over a restart too.
+    # Back to the top of the list: two swipes did not always reach it (the list is several screens long)
+    for _ in 1 2 3 4 5 6; do
+        sh_ input swipe $((WIDTH / 2)) $((HEIGHT / 4)) $((WIDTH / 2)) $((HEIGHT * 3 / 4)) 300
+    done
+    sleep 2
+    sh_ input tap $((WIDTH / 2)) $((HEIGHT * 30 / 100))
+    sleep 2
+    sh_ rm -f /sdcard/window.xml
+    sh_ uiautomator dump /sdcard/window.xml >/dev/null
+    if sh_ cat /sdcard/window.xml 2>/dev/null | grep -q 'id/parentPanel'; then
+        sh_ input tap $((WIDTH / 2)) $((HEIGHT * 30 / 100))
+        sleep 4
+        shot "15a-settings-light"
+        sh_ input swipe $((WIDTH / 2)) $((HEIGHT * 3 / 4)) $((WIDTH / 2)) $((HEIGHT / 4)) 500
+        sleep 2
+        shot "15b-settings-light-more"
+        sh_ input keyevent 4 # out of the settings, to the terminal
+        sleep 3
+        shot "15c-terminal-light"
+        sh_ input swipe 2 $((HEIGHT / 2)) $((WIDTH * 2 / 3)) $((HEIGHT / 2)) 300
+        sleep 2
+        shot "15d-drawer-light"
+        # Back in the settings, where the next step (the restart) expects to be: its first Back leaves
+        # them, and in the terminal it would close the session
+        drawer_tap btnDrawerSettings || log "no settings button found in the drawer"
+        sleep 3
+    else
+        log "the scheme picker did not open for the white scheme"
+    fi
 else
     log "no settings button found"
 fi

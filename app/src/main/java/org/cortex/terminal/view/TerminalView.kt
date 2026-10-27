@@ -301,6 +301,10 @@ class TerminalView @JvmOverloads constructor(
     /** The widths of the wide characters drawn so far (the key is the character's chars), for [drawWide]. */
     private val wideWidths = HashMap<Int, Float>()
 
+    /** The parts of the sextants, which are rectangles (no smoothing: they must meet without a seam). */
+    private val blockPaint = Paint().apply { style = Paint.Style.FILL }
+    private val astralChars = CharArray(2)
+
     var charWidth = 0f
         private set
     var charHeight = 0f
@@ -655,6 +659,7 @@ class TerminalView @JvmOverloads constructor(
         cursorPaint.color = TerminalColor.CURSOR_COLOR
         // Links, selection handles and search hits are in the accent of the scheme
         selectionHandlePaint.color = Chrome.palette.accent
+        selectionBgPaint.color = selectionBackground(Chrome.palette.dark, TerminalColor.DEFAULT_BG, Chrome.palette.accent)
         linkUnderlinePaint.color = Chrome.palette.accent
         searchMatchPaint.color = Chrome.mix(TerminalColor.DEFAULT_BG, TerminalColor.DEFAULT_FG, 0.25f)
         searchCurrentPaint.color = TerminalColor.ANSI_COLORS[3]
@@ -768,8 +773,11 @@ class TerminalView @JvmOverloads constructor(
                             // Draw inverse char on cursor
                             val char = if (col in 0 until row.chars.size) row.chars[col] else ' '
                             if (char != ' ' && char != TerminalRow.WIDE_TAIL) {
-                                textPaint.color = TerminalColor.DEFAULT_BG
-                                if (wide) {
+                                // Not bold or underlined as the last cell drawn was
+                                setTextPaint(TerminalColor.DEFAULT_BG, bold = false, underline = false)
+                                if (char == TerminalRow.ASTRAL) {
+                                    drawAstral(canvas, row.astralAt(col), cursorX, cursorY, cursorY + charBaseline, TerminalColor.DEFAULT_BG)
+                                } else if (wide) {
                                     drawWide(canvas, row.chars, col, cursorY + charBaseline)
                                 } else if (!Character.isSurrogate(char)) {
                                     canvas.drawText(row.chars, col, 1, cursorX, cursorY + charBaseline, textPaint)
@@ -910,6 +918,11 @@ class TerminalView @JvmOverloads constructor(
             val bold = (row.styles[c].toInt() and 1) != 0
             val underline = cellUnderlined(row, c, selected)
             setTextPaint(color, bold, underline)
+            if (ch == TerminalRow.ASTRAL) {
+                drawAstral(canvas, row.astralAt(c), c * charWidth, y, baseline, color)
+                c++
+                continue
+            }
             if (row.hasWide && row.isWideHead(c)) {
                 drawWide(canvas, chars, c, baseline)
                 c += 2
@@ -940,6 +953,46 @@ class TerminalView @JvmOverloads constructor(
             }
             canvas.drawText(chars, c, last - c + 1, c * charWidth, baseline, textPaint)
             c = last + 1
+        }
+    }
+
+    /**
+     * A character of the supplementary planes that takes one cell, at [x] of the row that starts at [y]:
+     * a sextant is drawn from rectangles, any other from the fonts (squeezed into the cell when its glyph
+     * is wider, as an icon of some fonts is).
+     */
+    private fun drawAstral(canvas: Canvas, cp: Int, x: Float, y: Float, baseline: Float, color: Int) {
+        if (Sextants.isSextant(cp)) {
+            val mask = Sextants.mask(cp)
+            blockPaint.color = color
+            val x1 = Math.round(x + charWidth / 2f).toFloat()
+            val x2 = x + charWidth
+            val y1 = Math.round(y + charHeight / 3f).toFloat()
+            val y2 = Math.round(y + charHeight * 2f / 3f).toFloat()
+            val y3 = y + charHeight
+            for (bit in 0..5) {
+                if ((mask and (1 shl bit)) == 0) continue
+                val left = if (bit % 2 == 0) x else x1
+                val right = if (bit % 2 == 0) x1 else x2
+                val top = when (bit / 2) { 0 -> y; 1 -> y1; else -> y2 }
+                val bottom = when (bit / 2) { 0 -> y1; 1 -> y2; else -> y3 }
+                canvas.drawRect(left, top, right, bottom, blockPaint)
+            }
+            return
+        }
+        textPaint.color = color
+        val count = Character.toChars(cp, astralChars, 0)
+        val width = wideWidths[cp] ?: textPaint.measureText(astralChars, 0, count).also {
+            if (wideWidths.size >= 4096) wideWidths.clear()
+            wideWidths[cp] = it
+        }
+        if (width > charWidth + 0.5f) {
+            canvas.save()
+            canvas.scale(charWidth / width, 1f, x, baseline)
+            canvas.drawText(astralChars, 0, count, x, baseline, textPaint)
+            canvas.restore()
+        } else {
+            canvas.drawText(astralChars, 0, count, x, baseline, textPaint)
         }
     }
 
@@ -1931,6 +1984,13 @@ class TerminalView @JvmOverloads constructor(
  * is one backspace for the program, and after it the line is the space again.
  */
 private const val IME_LINE = " "
+
+/**
+ * The color behind selected text (which is drawn in black): white on the dark schemes, as it was, and
+ * the accent faintly on the light ones, where white would not show on the background.
+ */
+internal fun selectionBackground(dark: Boolean, background: Int, accent: Int): Int =
+    if (dark) Chrome.WHITE else Chrome.mix(background, accent, 0.35f)
 
 /** The text sizes two fingers can set, in sp. */
 internal const val MIN_PINCH_TEXT_SP = 6f

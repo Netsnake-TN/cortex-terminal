@@ -62,10 +62,14 @@ class ChromeViewsTest {
     @Test
     fun theTabsShowOneTabForEachSessionAndMarkRootOnes() {
         val tabs = SessionTabsView(activity)
-        tabs.update(listOf(SessionTabsView.Tab("~", false), SessionTabsView.Tab("src", true)), 1)
+        tabs.update(listOf(SessionTabsView.Tab("Session 1", false), SessionTabsView.Tab("Session 2", true)), 1)
         assertEquals(2, tabRows(tabs).childCount)
-        val shown = texts(tabs)
-        assertTrue(shown.toString(), shown.containsAll(listOf("1", "~", "2", "src", "ROOT")))
+        // The number and nothing else (no directory); the one on screen (2) also has ROOT and the close button
+        assertEquals(listOf("1"), texts(tabRows(tabs).getChildAt(0)))
+        assertEquals(listOf("2", "ROOT", "✕"), texts(tabRows(tabs).getChildAt(1)))
+        // The words stay for a screen reader, and so does the root badge
+        assertEquals("Session 1", tabRows(tabs).getChildAt(0).contentDescription)
+        assertEquals("Session 2, ROOT", tabRows(tabs).getChildAt(1).contentDescription)
     }
 
     @Test
@@ -132,9 +136,10 @@ class ChromeViewsTest {
     @Test
     fun aSessionCardInflates() {
         val binding = ItemSessionBinding.inflate(LayoutInflater.from(activity))
-        assertNotNull(binding.sessionIndexBadge)
-        assertNotNull(binding.sessionPathText)
+        // The name of the session and the button that closes it; no number box and no directory
+        assertNotNull(binding.sessionLabelText)
         assertNotNull(binding.btnSessionClose)
+        assertNotNull(binding.sessionRootBadge)
     }
 
     @Test
