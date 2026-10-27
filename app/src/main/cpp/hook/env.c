@@ -54,6 +54,7 @@ static char **prepare_cortex_env(char *const envp[], const char *real_exe) {
     int has_frontend = 0;
     int has_debconf_frontend = 0;
     int has_debconf_seen = 0;
+    int has_home = 0;
 
     const char *chosen_real_exe = (real_exe && real_exe[0] != '\0') ? real_exe : (g_real_exe[0] != '\0' ? g_real_exe : NULL);
 
@@ -73,6 +74,9 @@ static char **prepare_cortex_env(char *const envp[], const char *real_exe) {
             break;
         case 'G':
             if (strncmp(e, "GLIBC_TUNABLES=", 15) == 0) has_tunables = 1;
+            break;
+        case 'H':
+            if (strncmp(e, "HOME=", 5) == 0) has_home = 1;
             break;
         case 'P':
             if (strncmp(e, "PATH=", 5) == 0) has_path = 1;
@@ -152,6 +156,13 @@ static char **prepare_cortex_env(char *const envp[], const char *real_exe) {
     // need not look again (it takes a look at /proc/self/fd in each of them, see privileged.c)
     if (!has_nt && g_no_translator) {
         new_env[dst++] = strdup("CORTEX_NT=0");
+    }
+    if (!has_home && g_cortex_root[0] != '\0') {
+        char *str = malloc(PATH_MAX + 16);
+        if (str) {
+            snprintf(str, PATH_MAX + 16, "HOME=%s/home", g_cortex_root);
+            new_env[dst++] = str;
+        }
     }
     if (!has_tunables) {
         new_env[dst++] = strdup("GLIBC_TUNABLES=glibc.pthread.rseq=0");
