@@ -52,14 +52,6 @@ jobs:
       - name: Make Gradle Wrapper Executable
         run: chmod +x gradlew
 
-      - name: Cache cortex-hook Libraries
-        uses: actions/cache@v4
-        with:
-          path: hook-libs
-          key: cortex-hook-${{ hashFiles('app/src/main/cpp/cortex-hook.c', 'app/src/main/cpp/hook/**', 'app/src/main/cpp/gosys/**', 'scripts/build-gosys.sh', 'app/src/main/cpp/root/**', '.github/workflows/build-debug.yml') }}
-          restore-keys: |
-            cortex-hook-
-
       - name: Build Glibc cortex-hook Libraries
         run: |
           sudo apt-get update -o Acquire::Retries=3 -qq
@@ -86,13 +78,17 @@ jobs:
             app/src/main/assets/bootstrap-arm64.tar.zst
             app/src/main/assets/bootstrap-arm.tar.zst
             app/src/main/assets/cacert.pem
-          key: bootstrap-rootfs-v5-${{ hashFiles('scripts/setup-extra-rootfs.sh', 'scripts/patch-bootstrap-ld.py', 'app/src/main/cpp/cortex-hook.c', 'app/src/main/cpp/hook/**', 'app/src/main/assets/*.gpg', '.github/workflows/build-debug.yml') }}
+            app/src/main/assets/devpkgs-arm64.tar.gz
+            app/src/main/assets/devpkgs-arm.tar.gz
+          key: bootstrap-rootfs-v6-${{ hashFiles('scripts/setup-extra-rootfs.sh', 'scripts/patch-bootstrap-ld.py', 'app/src/main/cpp/cortex-hook.c', 'app/src/main/cpp/hook/**', 'app/src/main/assets/*.gpg', '.github/workflows/build-debug.yml') }}
           restore-keys: |
-            bootstrap-rootfs-v5-
+            bootstrap-rootfs-v6-
 
       - name: Set up QEMU for multi-arch containers
         if: steps.cache-bootstrap.outputs.cache-hit != 'true'
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64,arm
 
       - name: Prepare extra-rootfs for bootstrap
         if: steps.cache-bootstrap.outputs.cache-hit != 'true'
@@ -165,6 +161,7 @@ jobs:
       - name: Patch and compress bootstrap archives
         if: steps.cache-bootstrap.outputs.cache-hit != 'true'
         run: |
+          sudo apt-get install -y --no-install-recommends zstd
           echo "Patching dynamic linkers in bootstrap archives for Android seccomp compliance..."
           python3 scripts/patch-bootstrap-ld.py
           echo "Compressing bootstrap archives with zstd -19..."
@@ -183,20 +180,17 @@ jobs:
       - name: Verify assets
         run: |
           ls -lh app/src/main/assets/
-
-      - name: Cache cortex-redirect binary
-        uses: actions/cache@v4
-        with:
-          path: app/src/main/assets/cortex-redirect
-          key: cortex-redirect-${{ hashFiles('cortex-redirect/cortex-redirect.c', 'cortex-redirect/build.sh', '.github/workflows/build-debug.yml') }}
-          restore-keys: |
-            cortex-redirect-
+          for f in libcortex-hook-arm64.so libcortex-hook-arm.so cortex-chroot-arm64.elf cortex-chroot-arm.elf \
+                   bootstrap-arm64.tar.zst bootstrap-arm.tar.zst cacert.pem devpkgs-arm64.tar.gz devpkgs-arm.tar.gz; do
+            test -s "app/src/main/assets/$f" || { echo "::error::missing asset $f"; exit 1; }
+          done
 
       - name: Build cortex-redirect seccomp supervisor
         run: |
           sudo apt-get update -o Acquire::Retries=3 -qq
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu file
           bash cortex-redirect/build.sh
+          test -s app/src/main/assets/cortex-redirect
 
       - name: Assemble Debug APK
         run: |
@@ -207,4 +201,5 @@ jobs:
         with:
           name: cortex-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
           retention-days: 3
