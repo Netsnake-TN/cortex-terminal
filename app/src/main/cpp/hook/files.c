@@ -5,6 +5,8 @@
 
 #ifndef CORTEX_HOST_TEST
 
+#include "hook-common.h"
+
 #ifndef O_TMPFILE
 #define O_TMPFILE (020000000 | 00200000)
 #endif

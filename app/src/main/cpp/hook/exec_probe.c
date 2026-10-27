@@ -1,6 +1,9 @@
 // Part of libcortex-hook.so, included by cortex-hook.c (one translation unit, so the
 // parts share their static functions and are built with the same command as before).
 //
+#include "hook-common.h"
+// parts share their static functions and are built with the same command as before).
+//
 // What execve() and posix_spawn() need to know about a program: its ld.so, whether it is a
 // dynamic ELF, a script and its interpreter, and the argument lists built from that.
 

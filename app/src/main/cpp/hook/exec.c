@@ -6,6 +6,8 @@
 
 #ifndef CORTEX_HOST_TEST
 
+#include "hook-common.h"
+
 static void resolve_symlinks(const char *path, char *out, size_t out_size, int depth) {
     if (!path || !out || out_size == 0) return;
     strncpy(out, path, out_size - 1);

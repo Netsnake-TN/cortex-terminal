@@ -6,6 +6,8 @@
 
 #ifndef CORTEX_HOST_TEST
 
+#include "hook-common.h"
+
 static char **clean_env_for_system(char *const envp[]) {
     int count = 0;
     while (envp && envp[count]) count++;

@@ -6,6 +6,8 @@
 
 #ifndef CORTEX_HOST_TEST
 
+#include "hook-common.h"
+
 #ifndef SYS_SECCOMP
 #define SYS_SECCOMP 1
 #endif

@@ -8,8 +8,7 @@
 // Pure string functions (no syscalls), so tests/native can check them directly. They run on
 // every file-system call, so they avoid snprintf and compute the rootfs prefix length once.
 
-static char g_cortex_root[PATH_MAX] = {0};
-static size_t g_cortex_root_len = 0;
+char g_cortex_root[PATH_MAX] = {0};
 
 static void cortex_set_root(const char *root, size_t len) {
     if (!root) len = 0;

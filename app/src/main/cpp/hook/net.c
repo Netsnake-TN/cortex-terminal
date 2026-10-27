@@ -175,6 +175,8 @@ static int dns_parse_answer(const unsigned char *msg, int n, uint16_t txid, int 
 
 #ifndef CORTEX_HOST_TEST
 
+#include "hook-common.h"
+
 // DNS resolution hooking and localhost DNS redirect
 #define DNS_REDIRECT_MAX 64
 static struct {

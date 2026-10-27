@@ -103,6 +103,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf libc6-dev-arm64-cross libc6-dev-armhf-cross dpkg-dev
           mkdir -p hook-libs
           scripts/build-gosys.sh
+          scripts/build-gosys.sh
           aarch64-linux-gnu-gcc -std=gnu11 -shared -fPIC -O3 -fno-delete-null-pointer-checks -Wall -Wno-nonnull-compare -Wl,-z,max-page-size=16384 -o hook-libs/libcortex-hook-arm64.so app/src/main/cpp/cortex-hook.c -ldl
           arm-linux-gnueabihf-gcc -std=gnu11 -shared -fPIC -O3 -fno-delete-null-pointer-checks -Wall -Wno-nonnull-compare -Wl,-z,max-page-size=16384 -o hook-libs/libcortex-hook-arm.so app/src/main/cpp/cortex-hook.c -ldl
           aarch64-linux-gnu-gcc -std=gnu11 -static -O2 -Wall -Wextra -Werror -Wl,-z,max-page-size=16384 -o hook-libs/cortex-chroot-arm64.elf app/src/main/cpp/root/cortex-chroot.c

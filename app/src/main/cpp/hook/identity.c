@@ -128,6 +128,8 @@ static pthread_mutex_t g_pwd_lock_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int CORTEX_SHADOW_SYM(lckpwdf)(void) {
 #ifndef CORTEX_HOST_TEST
+
+#include "hook-common.h"
     init_cortex_hook();
     pthread_mutex_lock(&g_pwd_lock_mutex);
     if (g_pwd_lock_fd != -1) {
@@ -158,6 +160,7 @@ int CORTEX_SHADOW_SYM(lckpwdf)(void) {
 
 int CORTEX_SHADOW_SYM(ulckpwdf)(void) {
 #ifndef CORTEX_HOST_TEST
+
     pthread_mutex_lock(&g_pwd_lock_mutex);
     if (g_pwd_lock_fd >= 0) {
         close(g_pwd_lock_fd);
@@ -184,7 +187,7 @@ static int cortex_lookup_group(const char *search_name, gid_t search_gid, int by
 
     // 1. Try reading /etc/group from Cortex rootfs
 #ifndef CORTEX_HOST_TEST
-    char path_buf[PATH_MAX];
+
     const char *grp_path = rewrite_path("/etc/group", path_buf, sizeof(path_buf));
     static int (*orig_open)(const char *, int, ...) = NULL;
     if (!orig_open) orig_open = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, "open");
@@ -358,8 +361,8 @@ static int cortex_lookup_passwd(const char *search_name, uid_t search_uid, int b
 
     // 1. Try reading /etc/passwd from Cortex rootfs
 #ifndef CORTEX_HOST_TEST
+
     char path_buf[PATH_MAX];
-    const char *pwd_path = rewrite_path("/etc/passwd", path_buf, sizeof(path_buf));
     static int (*orig_open)(const char *, int, ...) = NULL;
     if (!orig_open) orig_open = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, "open");
     int fd = (orig_open && pwd_path) ? orig_open(pwd_path, O_RDONLY | O_CLOEXEC) : -1;
@@ -537,9 +540,9 @@ static int cortex_lookup_passwd(const char *search_name, uid_t search_uid, int b
 }
 
 #ifndef CORTEX_HOST_TEST
+
 // The shadow database (/etc/shadow) of the rootfs. libc reads the real /etc/shadow of the machine,
 // which Android does not have: pam_unix's account check for root found no entry and answered
-// "Authentication failure", so chfn, chsh and `adduser --gecos` (the installation of PostgreSQL)
 // failed. The fields are "name:hash:lastchange:min:max:warn:inactive:expire:flag", numbers empty
 // when unset (libc stores -1 then).
 static int cortex_lookup_shadow(const char *name, struct spwd *sp, char *buf, size_t buflen) {
@@ -638,10 +641,10 @@ static char s_pwd_buf[2048];
 
 struct group *CORTEX_NSS_SYM(getgrgid)(gid_t gid) {
 #ifndef CORTEX_HOST_TEST
+
     static struct group *(*orig_getgrgid)(gid_t) = NULL;
     if (!orig_getgrgid) orig_getgrgid = (struct group *(*)(gid_t))dlsym(RTLD_NEXT, "getgrgid");
     struct group *res = orig_getgrgid ? orig_getgrgid(gid) : NULL;
-    if (res) return res;
 #endif
 
     int err = cortex_lookup_group(NULL, gid, 0, &s_grp_storage, s_grp_buf, sizeof(s_grp_buf));
@@ -651,11 +654,11 @@ struct group *CORTEX_NSS_SYM(getgrgid)(gid_t gid) {
 
 struct group *CORTEX_NSS_SYM(getgrnam)(const char *name) {
 #ifndef CORTEX_HOST_TEST
+
     static struct group *(*orig_getgrnam)(const char *) = NULL;
     if (!orig_getgrnam) orig_getgrnam = (struct group *(*)(const char *))dlsym(RTLD_NEXT, "getgrnam");
     struct group *res = orig_getgrnam ? orig_getgrnam(name) : NULL;
     if (res) return res;
-#endif
 
     int err = cortex_lookup_group(name, 0, 1, &s_grp_storage, s_grp_buf, sizeof(s_grp_buf));
     if (err == 0) return &s_grp_storage;
@@ -664,12 +667,12 @@ struct group *CORTEX_NSS_SYM(getgrnam)(const char *name) {
 
 int CORTEX_NSS_SYM(getgrgid_r)(gid_t gid, struct group *grp, char *buf, size_t buflen, struct group **result) {
 #ifndef CORTEX_HOST_TEST
+
     static int (*orig_getgrgid_r)(gid_t, struct group *, char *, size_t, struct group **) = NULL;
     if (!orig_getgrgid_r) orig_getgrgid_r = (int (*)(gid_t, struct group *, char *, size_t, struct group **))dlsym(RTLD_NEXT, "getgrgid_r");
     int ret = orig_getgrgid_r ? orig_getgrgid_r(gid, grp, buf, buflen, result) : ENOENT;
 #else
     int ret = g_test_orig_nss_r_ret;
-    if (result) *result = (ret == 0 && g_test_orig_nss_r_found) ? grp : NULL;
 #endif
     if (ret == 0 && result && *result != NULL) return 0;
     if (ret != 0 && ret != ENOENT) {
@@ -688,13 +691,13 @@ int CORTEX_NSS_SYM(getgrgid_r)(gid_t gid, struct group *grp, char *buf, size_t b
 
 int CORTEX_NSS_SYM(getgrnam_r)(const char *name, struct group *grp, char *buf, size_t buflen, struct group **result) {
 #ifndef CORTEX_HOST_TEST
+
     static int (*orig_getgrnam_r)(const char *, struct group *, char *, size_t, struct group **) = NULL;
     if (!orig_getgrnam_r) orig_getgrnam_r = (int (*)(const char *, struct group *, char *, size_t, struct group **))dlsym(RTLD_NEXT, "getgrnam_r");
     int ret = orig_getgrnam_r ? orig_getgrnam_r(name, grp, buf, buflen, result) : ENOENT;
 #else
     int ret = g_test_orig_nss_r_ret;
     if (result) *result = (ret == 0 && g_test_orig_nss_r_found) ? grp : NULL;
-#endif
     if (ret == 0 && result && *result != NULL) return 0;
     if (ret != 0 && ret != ENOENT) {
         if (result) *result = NULL;
@@ -724,6 +727,7 @@ static struct passwd *present_privsep_user_as_root(struct passwd *pwd) {
 
 struct passwd *CORTEX_NSS_SYM(getpwuid)(uid_t uid) {
 #ifndef CORTEX_HOST_TEST
+
     static struct passwd *(*orig_getpwuid)(uid_t) = NULL;
     if (!orig_getpwuid) orig_getpwuid = (struct passwd *(*)(uid_t))dlsym(RTLD_NEXT, "getpwuid");
     struct passwd *res = orig_getpwuid ? orig_getpwuid(uid) : NULL;
@@ -731,7 +735,6 @@ struct passwd *CORTEX_NSS_SYM(getpwuid)(uid_t uid) {
 #endif
 
 uid_t real_euid = cortex_real_euid();
-    if (uid != 0 && uid != real_euid) return NULL;
 
     int err = cortex_lookup_passwd(NULL, uid, 0, &s_pwd_storage, s_pwd_buf, sizeof(s_pwd_buf));
     if (err == 0) return &s_pwd_storage;
@@ -740,6 +743,7 @@ uid_t real_euid = cortex_real_euid();
 
 struct passwd *CORTEX_NSS_SYM(getpwnam)(const char *name) {
 #ifndef CORTEX_HOST_TEST
+
     static struct passwd *(*orig_getpwnam)(const char *) = NULL;
     if (!orig_getpwnam) orig_getpwnam = (struct passwd *(*)(const char *))dlsym(RTLD_NEXT, "getpwnam");
     struct passwd *res = orig_getpwnam ? orig_getpwnam(name) : NULL;
@@ -748,11 +752,11 @@ struct passwd *CORTEX_NSS_SYM(getpwnam)(const char *name) {
 
     int err = cortex_lookup_passwd(name, 0, 1, &s_pwd_storage, s_pwd_buf, sizeof(s_pwd_buf));
     if (err == 0) return present_privsep_user_as_root(&s_pwd_storage);
-    return NULL;
 }
 
 int CORTEX_NSS_SYM(getpwuid_r)(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
 #ifndef CORTEX_HOST_TEST
+
     static int (*orig_getpwuid_r)(uid_t, struct passwd *, char *, size_t, struct passwd **) = NULL;
     if (!orig_getpwuid_r) orig_getpwuid_r = (int (*)(uid_t, struct passwd *, char *, size_t, struct passwd **))dlsym(RTLD_NEXT, "getpwuid_r");
     int ret = orig_getpwuid_r ? orig_getpwuid_r(uid, pwd, buf, buflen, result) : ENOENT;
@@ -762,7 +766,6 @@ int CORTEX_NSS_SYM(getpwuid_r)(uid_t uid, struct passwd *pwd, char *buf, size_t 
 #endif
     if (ret == 0 && result && *result != NULL) return 0;
     if (ret != 0 && ret != ENOENT) {
-        if (result) *result = NULL;
         return ret;
     }
 
@@ -783,6 +786,7 @@ int CORTEX_NSS_SYM(getpwuid_r)(uid_t uid, struct passwd *pwd, char *buf, size_t 
 
 int CORTEX_NSS_SYM(getpwnam_r)(const char *name, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
 #ifndef CORTEX_HOST_TEST
+
     static int (*orig_getpwnam_r)(const char *, struct passwd *, char *, size_t, struct passwd **) = NULL;
     if (!orig_getpwnam_r) orig_getpwnam_r = (int (*)(const char *, struct passwd *, char *, size_t, struct passwd **))dlsym(RTLD_NEXT, "getpwnam_r");
     int ret = orig_getpwnam_r ? orig_getpwnam_r(name, pwd, buf, buflen, result) : ENOENT;
@@ -793,7 +797,6 @@ int CORTEX_NSS_SYM(getpwnam_r)(const char *name, struct passwd *pwd, char *buf, 
     if (ret == 0 && result && *result != NULL) {
         present_privsep_user_as_root(*result);
         return 0;
-    }
     if (ret != 0 && ret != ENOENT) {
         if (result) *result = NULL;
         return ret;

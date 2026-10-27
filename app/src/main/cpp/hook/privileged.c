@@ -41,6 +41,8 @@ static int for_each_range_without(unsigned int first, unsigned int last, const i
 
 #ifndef CORTEX_HOST_TEST
 
+#include "hook-common.h"
+
 // ndk_translation's file is "/memfd:child"; any memory file counts in a process whose executable is
 // a translator's runner (houdini). ndk_translation shows a program its own path as /proc/self/exe,
 // so the name is what tells there.

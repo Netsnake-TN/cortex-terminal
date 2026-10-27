@@ -3,7 +3,8 @@
 //
 // Statically linked programs: their seccomp-blocked system calls are patched before they run.
 
-// ---- Static programs ----------------------------------------------------------------------
+// ---- Static programs.
+#include "hook-common.h"
 // A statically linked program (gcc -static) carries its own copy of glibc, whose system calls the
 // preloaded hook never sees. The ones Android's seccomp filter answers with SIGSYS therefore kill it:
 // set_robust_list at start-up, clone3 for every thread, rseq, and the others the hook's SIGSYS

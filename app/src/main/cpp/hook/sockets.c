@@ -34,6 +34,8 @@ static void report_listening_port(const char *root, size_t root_len, int port, c
 
 #ifndef CORTEX_HOST_TEST
 
+#include "hook-common.h"
+
 int listen(int sockfd, int backlog) {
     static int (*orig_listen)(int, int) = NULL;
     if (!orig_listen) orig_listen = (int (*)(int, int))dlsym(RTLD_NEXT, "listen");

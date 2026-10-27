@@ -6,6 +6,8 @@
 
 #ifndef CORTEX_HOST_TEST
 
+#include "hook-common.h"
+
 // Hook faccessat
 int faccessat(int dirfd, const char *pathname, int mode, int flags) {
     init_cortex_hook();
@@ -599,7 +601,7 @@ __asm__(
 );
 #endif
 
-int glob(const char *pattern, int flags,
+static int glob(const char *pattern, int flags,
          int (*errfunc)(const char *),
          glob_t *pglob) {
     static int (*orig_glob)(const char *, int, int (*)(const char *, int), glob_t *) = NULL;

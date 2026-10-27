@@ -58,11 +58,14 @@ static long g_hl_next_try = 0;               // when to look for the file again 
 static pthread_mutex_t g_hardlinks_lock = PTHREAD_MUTEX_INITIALIZER;
 
 #ifndef CORTEX_HOST_TEST
+
+#include "hook-common.h"
 static void init_cortex_hook(void);
 #endif
 
 static size_t hl_table_path(char *buf, size_t size) {
 #ifndef CORTEX_HOST_TEST
+
     // The rootfs is known once a path was rewritten; "ln a b" or "stat a" name only relative ones
     init_cortex_hook();
 #endif
@@ -514,7 +517,7 @@ static int cortex_emulate_hardlinkat(int olddirfd, const char *rold, int newdirf
 
     // Clean up stale dangling symlink or stale dead-process lock file at rnew
 #ifndef CORTEX_HOST_TEST
-    struct stat lst;
+
     int have_lst = 0;
     if (orig_fstatat) {
         if (orig_fstatat(newdirfd, rnew, &lst, AT_SYMLINK_NOFOLLOW) == 0) have_lst = 1;
@@ -602,8 +605,8 @@ static int cortex_emulate_hardlinkat(int olddirfd, const char *rold, int newdirf
     struct stat st_new;
     memset(&st_new, 0, sizeof(st_new));
 #ifndef CORTEX_HOST_TEST
+
     static int (*orig_fstat)(int, struct stat *) = NULL;
-    if (!orig_fstat) orig_fstat = (int (*)(int, struct stat *))dlsym(RTLD_NEXT, "fstat");
     if (orig_fstat) orig_fstat(fd_new, &st_new);
     else fstat(fd_new, &st_new);
 #else

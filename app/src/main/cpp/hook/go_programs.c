@@ -4,7 +4,8 @@
 // Static Go programs: they make their system calls themselves, so Ubuntu's paths mean nothing to
 // them. The code of gosys/gosys.c is added to their file.
 
-// ---- Static Go programs -------------------------------------------------------------------
+// ---- Static Go programs.
+#include "hook-common.h"
 // A Go program built without cgo (all of Ubuntu's, and the single files downloaded from a project's
 // releases) has no C library: the preloaded hook is never loaded into it, so "/etc/resolv.conf" is
 // a file of Android's that does not exist, and so is every program it starts. Go makes all of its

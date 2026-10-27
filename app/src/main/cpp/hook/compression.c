@@ -5,6 +5,8 @@
 
 #ifndef CORTEX_HOST_TEST
 
+#include "hook-common.h"
+
 // Hook lzma multi-threaded routines to enforce single-threaded execution
 // This prevents clone/pthread_create failures in forked dpkg-deb child processes on Android
 typedef struct {
