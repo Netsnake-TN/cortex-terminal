@@ -11,6 +11,7 @@
 // every file-system call, so they avoid snprintf and compute the rootfs prefix length once.
 
 char g_cortex_root[PATH_MAX] = {0};
+size_t g_cortex_root_len = 0;
 
 static void cortex_set_root(const char *root, size_t len) {
     if (!root) len = 0;
