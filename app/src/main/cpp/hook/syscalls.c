@@ -127,6 +127,5 @@ static int is_handled_sigsys_syscall(int sys_nr) {
     return 0;
 }
 
-int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-    return accept4(sockfd, addr, addrlen, 0);
-}
+/* accept() -> accept4() shim lives in hook/sockets.c (uses dlsym(RTLD_NEXT) to avoid recursion).
+   This file only declares the seccomp-sigsys-safe syscall handlers. */
