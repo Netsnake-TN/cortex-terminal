@@ -8,6 +8,10 @@
 
 #include "hook-common.h"
 
+// Minimal glob_t declaration — only the fields we pass through to dlsym(RTLD_NEXT, "glob")
+// are needed; the real definition comes from <glob.h> in the guest process at runtime.
+typedef struct { size_t gl_pathc; char **gl_pathv; int gl_error; } glob_t;
+
 // Hook faccessat
 int faccessat(int dirfd, const char *pathname, int mode, int flags) {
     init_cortex_hook();
@@ -602,7 +606,7 @@ __asm__(
 #endif
 
 static int glob(const char *pattern, int flags,
-         int (*errfunc)(const char *),
+         int (*errfunc)(const char *, int),
          glob_t *pglob) {
     static int (*orig_glob)(const char *, int, int (*)(const char *, int), glob_t *) = NULL;
     if (!orig_glob) orig_glob = (int (*)(const char *, int, int (*)(const char *, int), glob_t *))dlsym(RTLD_NEXT, "glob");
@@ -610,6 +614,6 @@ static int glob(const char *pattern, int flags,
     char buf[PATH_MAX];
     const char *target = rewrite_path(pattern, buf, sizeof(buf));
     return orig_glob ? orig_glob(target, flags, errfunc, pglob) : -1;
-
+}
 
 #endif /* !CORTEX_HOST_TEST */
