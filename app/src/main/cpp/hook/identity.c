@@ -188,6 +188,7 @@ static int cortex_lookup_group(const char *search_name, gid_t search_gid, int by
     // 1. Try reading /etc/group from Cortex rootfs
 #ifndef CORTEX_HOST_TEST
 
+    char path_buf[PATH_MAX];
     const char *grp_path = rewrite_path("/etc/group", path_buf, sizeof(path_buf));
     static int (*orig_open)(const char *, int, ...) = NULL;
     if (!orig_open) orig_open = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, "open");
@@ -363,6 +364,7 @@ static int cortex_lookup_passwd(const char *search_name, uid_t search_uid, int b
 #ifndef CORTEX_HOST_TEST
 
     char path_buf[PATH_MAX];
+    const char *pwd_path = rewrite_path("/etc/passwd", path_buf, sizeof(path_buf));
     static int (*orig_open)(const char *, int, ...) = NULL;
     if (!orig_open) orig_open = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, "open");
     int fd = (orig_open && pwd_path) ? orig_open(pwd_path, O_RDONLY | O_CLOEXEC) : -1;
@@ -663,6 +665,7 @@ struct group *CORTEX_NSS_SYM(getgrnam)(const char *name) {
     int err = cortex_lookup_group(name, 0, 1, &s_grp_storage, s_grp_buf, sizeof(s_grp_buf));
     if (err == 0) return &s_grp_storage;
     return NULL;
+#endif
 }
 
 int CORTEX_NSS_SYM(getgrgid_r)(gid_t gid, struct group *grp, char *buf, size_t buflen, struct group **result) {
@@ -703,6 +706,7 @@ int CORTEX_NSS_SYM(getgrnam_r)(const char *name, struct group *grp, char *buf, s
         if (result) *result = NULL;
         return ret;
     }
+#endif
 
     int err = cortex_lookup_group(name, 0, 1, grp, buf, buflen);
     if (err == 0) {
@@ -797,6 +801,7 @@ int CORTEX_NSS_SYM(getpwnam_r)(const char *name, struct passwd *pwd, char *buf, 
     if (ret == 0 && result && *result != NULL) {
         present_privsep_user_as_root(*result);
         return 0;
+    }
     if (ret != 0 && ret != ENOENT) {
         if (result) *result = NULL;
         return ret;
