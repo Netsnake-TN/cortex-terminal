@@ -43,7 +43,13 @@ void *dlmopen(Lmid_t lmid, const char *filename, int flags) {
 // Hook open
 int open(const char *pathname, int flags, ...) {
     static int (*orig_open)(const char *, int, ...) = NULL;
-    if (!orig_open) orig_open = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, "open");
+    if (!orig_open) {
+        orig_open = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, "open");
+        if (!orig_open) {
+            errno = ENOSYS;
+            return -1;
+        }
+    }
     init_cortex_hook();
     char exe_buf[PATH_MAX];
     if (is_proc_self_exe(pathname)) {
