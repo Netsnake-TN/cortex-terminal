@@ -366,6 +366,30 @@ then
 else
     log "no python3 for the sextants file"
 fi
+# neofetch, for the README's first picture (the same screen in each release). Where packages can be
+# installed (not on the 16 KB image), and not a reason to fail: the picture is all it is for. The small
+# Ubuntu logo and a few lines fit the width of a phone (the big logo and the long lines wrap over each
+# other); the kernel line is long, the CPU, the uptime, the model and the architecture of an emulator mean
+# nothing here (it is an x86_64 phone to neofetch). An alias, so that the screen shows the plain command.
+neofetch_running() { sh_ ps -A -o ARGS 2>/dev/null | grep -q '[n]eofetch'; }
+neofetch_done() { ! neofetch_running; }
+if [ "${E2E_NO_APT:-0}" != 1 ]; then
+    sh_ rm -f "$DEVICE_OUT/neofetch-installed"
+    run_line "apt-get install -y --no-install-recommends neofetch >/dev/null 2>&1 && echo done > $DEVICE_OUT/neofetch-installed" 1
+    if wait_for 300 run_ test -s "$DEVICE_OUT/neofetch-installed"; then
+        run_line "alias neofetch='neofetch --ascii_distro ubuntu_small --os_arch off --disable model kernel uptime cpu'; clear" 2
+        run_line "neofetch" 5
+        if wait_for 240 neofetch_done; then
+            sleep 3
+            shot "readme-neofetch"
+        else
+            log "neofetch did not finish"
+        fi
+        run_line "unalias neofetch; clear" 2
+    else
+        log "neofetch was not installed"
+    fi
+fi
 # A second session, then the session list in the drawer
 drawer_tap btnDrawerNewSession || log "no new-session button found"
 sleep 8
@@ -402,6 +426,10 @@ if tap_id btnDrawerSettings; then
     sh_ input swipe $((WIDTH / 2)) $((HEIGHT * 3 / 4)) $((WIDTH / 2)) $((HEIGHT / 4)) 500
     sleep 2
     shot "15-settings-root-mode"
+    # The very end of the list, with the Root mode switch clear of the navigation bar (the README)
+    sh_ input swipe $((WIDTH / 2)) $((HEIGHT * 3 / 4)) $((WIDTH / 2)) $((HEIGHT / 4)) 500
+    sleep 2
+    shot "15z-settings-bottom"
     # The white scheme (second entry of the picker): the settings, the terminal and the drawer in it.
     # It stays chosen for the rest of the run, which shows that it is kept over a restart too.
     # Back to the top of the list: two swipes did not always reach it (the list is several screens long)
