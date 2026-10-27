@@ -69,6 +69,13 @@ jobs:
           aarch64-linux-gnu-gcc -std=gnu11 -static -O2 -Wall -Wextra -Werror -Wl,-z,max-page-size=16384 -o hook-libs/cortex-chroot-arm64.elf app/src/main/cpp/root/cortex-chroot.c
           arm-linux-gnueabihf-gcc -std=gnu11 -static -O2 -Wall -Wextra -Werror -Wl,-z,max-page-size=16384 -o hook-libs/cortex-chroot-arm.elf app/src/main/cpp/root/cortex-chroot.c
 
+      - name: Copy native libs to assets
+        run: |
+          cp hook-libs/libcortex-hook-arm64.so app/src/main/assets/libcortex-hook-arm64.so
+          cp hook-libs/libcortex-hook-arm.so app/src/main/assets/libcortex-hook-arm.so
+          cp hook-libs/cortex-chroot-arm64.elf app/src/main/assets/cortex-chroot-arm64.elf
+          cp hook-libs/cortex-chroot-arm.elf app/src/main/assets/cortex-chroot-arm.elf
+
       - name: Build cortex-redirect seccomp supervisor
         run: |
           sudo apt-get update -o Acquire::Retries=3 -qq
