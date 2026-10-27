@@ -57,6 +57,8 @@ jobs:
         with:
           path: hook-libs
           key: cortex-hook-${{ hashFiles('app/src/main/cpp/cortex-hook.c', 'app/src/main/cpp/hook/**', 'app/src/main/cpp/gosys/**', 'scripts/build-gosys.sh', 'app/src/main/cpp/root/**', '.github/workflows/build-debug.yml') }}
+          restore-keys: |
+            cortex-hook-
 
       - name: Build Glibc cortex-hook Libraries
         run: |
@@ -85,6 +87,8 @@ jobs:
             app/src/main/assets/bootstrap-arm.tar.zst
             app/src/main/assets/cacert.pem
           key: bootstrap-rootfs-v5-${{ hashFiles('scripts/setup-extra-rootfs.sh', 'scripts/patch-bootstrap-ld.py', 'app/src/main/cpp/cortex-hook.c', 'app/src/main/cpp/hook/**', 'app/src/main/assets/*.gpg', '.github/workflows/build-debug.yml') }}
+          restore-keys: |
+            bootstrap-rootfs-v5-
 
       - name: Set up QEMU for multi-arch containers
         if: steps.cache-bootstrap.outputs.cache-hit != 'true'
@@ -179,6 +183,14 @@ jobs:
       - name: Verify assets
         run: |
           ls -lh app/src/main/assets/
+
+      - name: Cache cortex-redirect binary
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/assets/cortex-redirect
+          key: cortex-redirect-${{ hashFiles('cortex-redirect/cortex-redirect.c', 'cortex-redirect/build.sh', '.github/workflows/build-debug.yml') }}
+          restore-keys: |
+            cortex-redirect-
 
       - name: Build cortex-redirect seccomp supervisor
         run: |
