@@ -546,18 +546,6 @@ char *realpath(const char *path, char *resolved_path) {
     char pbuf[PATH_MAX];
     const char *target = rewrite_path(path, pbuf, sizeof(pbuf));
     char *res = orig_realpath ? orig_realpath(target, resolved_path) : NULL;
-    if (res && g_cortex_root[0] != '\0') {
-        size_t rlen = g_cortex_root_len;
-        if (strncmp(res, g_cortex_root, rlen) == 0 && (res[rlen] == '/' || res[rlen] == '\0')) {
-            size_t rem_len = strlen(res + rlen);
-            if (rem_len == 0) {
-                res[0] = '/';
-                res[1] = '\0';
-            } else {
-                memmove(res, res + rlen, rem_len + 1);
-            }
-        }
-    }
     return res;
 }
 
@@ -607,7 +595,19 @@ __asm__(
     ".globl mkstemps64\n"  ".set mkstemps64, mkstemps\n"
     ".globl mkostemps64\n" ".set mkostemps64, mkostemps\n"
     ".globl tmpfile64\n"   ".set tmpfile64, tmpfile\n"
+    ".globl glob64\n"      ".set glob64, glob\n"
 );
 #endif
+
+int glob(const char *pattern, int flags,
+         int (*errfunc)(const char *),
+         glob_t *pglob) {
+    static int (*orig_glob)(const char *, int, int (*)(const char *, int), glob_t *) = NULL;
+    if (!orig_glob) orig_glob = (int (*)(const char *, int, int (*)(const char *, int), glob_t *))dlsym(RTLD_NEXT, "glob");
+    if (!pattern) return orig_glob ? orig_glob(pattern, flags, errfunc, pglob) : -1;
+    char buf[PATH_MAX];
+    const char *target = rewrite_path(pattern, buf, sizeof(buf));
+    return orig_glob ? orig_glob(target, flags, errfunc, pglob) : -1;
+
 
 #endif /* !CORTEX_HOST_TEST */
