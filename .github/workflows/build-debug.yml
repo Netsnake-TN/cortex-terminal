@@ -67,7 +67,7 @@ jobs:
           export ANDROID_HOME=$HOME/android-sdk
           export PATH=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH
           sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1" >/dev/null 2>&1 || true
-          $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
+          yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
 
       - name: Cache Android NDK and CMake (restore)
         uses: actions/cache@v4
