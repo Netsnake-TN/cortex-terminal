@@ -32,7 +32,6 @@
 #include <pwd.h>
 #include <grp.h>
 #include <shadow.h>
-#include <glob.h>
 #include <execinfo.h>
 #include <pthread.h>
 #include <sys/sendfile.h>
