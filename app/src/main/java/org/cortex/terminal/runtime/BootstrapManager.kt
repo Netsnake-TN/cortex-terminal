@@ -8,6 +8,7 @@ import org.cortex.terminal.pty.PtyProcess
 import java.io.File
 import java.io.InputStream
 import java.io.PushbackInputStream
+import java.io.RandomAccessFile
 import java.util.zip.GZIPInputStream
 
 object BootstrapManager {
@@ -51,6 +52,7 @@ object BootstrapManager {
         }
 
         ensureHookLibrary(context, root)
+        ensureRawSyscallRedirects(context, root, home)
         updateDnsConfiguration(context, root)
         cleanupAptArtifacts(root)
         ensureAptSandbox(root)
@@ -1578,6 +1580,131 @@ object BootstrapManager {
             // EIO: the command has ended and closed the terminal
         }
         return pty.waitFor()
+    }
+
+    private fun ensureRawSyscallRedirects(context: Context, root: File, home: File) {
+        val dbg = File(root, "tmp/rawsyscall.log")
+        fun dlog(s: String) { try { dbg.parentFile?.mkdirs(); dbg.appendText(s + "\n") } catch (e: Exception) {} }
+        try {
+            dlog("=== ensureRawSyscallRedirects run home=$home ===")
+            val crBin = File(root, "usr/bin/cortex-redirect")
+            crBin.parentFile?.mkdirs()
+            context.assets.open("cortex-redirect").use { ins ->
+                crBin.outputStream().use { out -> ins.copyTo(out) }
+            }
+            crBin.setExecutable(true, false)
+            crBin.setReadable(true, false)
+            try { android.system.Os.chmod(crBin.absolutePath, 493) } catch (e: Exception) {}
+            val crSize = crBin.length()
+            dlog("wrapper=$crBin size=$crSize")
+
+            val dirs = LinkedHashSet<File>()
+            listOf(".local/bin", "bin", ".kilo/bin").forEach { dirs.add(File(home, it)) }
+            home.listFiles { d -> d.isDirectory && d.name.startsWith(".") }?.forEach { d ->
+                dirs.add(File(d, "bin"))
+            }
+            dirs.add(File(root, "usr/local/bin"))
+
+            for (dir in dirs) {
+                if (!dir.isDirectory) { dlog("skip(no dir): $dir"); continue }
+                val files = dir.listFiles() ?: continue
+                for (f in files) {
+                    val why = when {
+                        !f.isFile -> "not-file"
+                        !f.canExecute() -> "not-exec"
+                        f.name.endsWith(".real") -> "already-real"
+                        f.length() == crSize -> "already-wrapper"
+                        !isElf(f) -> "not-elf"
+                        !needsRedirect(f) -> "dynamic-glibc (hook handles it)"
+                        else -> null
+                    }
+                    if (why != null) { dlog("  ${f.name} -> skip ($why)"); continue }
+                    val real = File(dir, f.name + ".real")
+                    if (real.exists()) real.delete()
+                    if (!f.renameTo(real)) { f.copyTo(real, overwrite = true); f.delete() }
+                    crBin.copyTo(f, overwrite = true)
+                    f.setExecutable(true, false)
+                    f.setReadable(true, false)
+                    try { android.system.Os.chmod(f.absolutePath, 493) } catch (e: Exception) {}
+                    dlog("  ${f.name} -> WRAPPED (real=${real.name})")
+                    android.util.Log.i(TAG, "raw-syscall redirect: wrapped ${f.name} (in ${dir.name})")
+                }
+            }
+            dlog("=== done ===")
+        } catch (e: Exception) {
+            dlog("FAILED: $e")
+            android.util.Log.e(TAG, "ensureRawSyscallRedirects failed", e)
+        }
+    }
+
+    private fun isElf(f: File): Boolean {
+        return try {
+            val hdr = ByteArray(4)
+            f.inputStream().use { it.read(hdr) >= 4 &&
+                hdr[0] == 0x7f.toByte() && hdr[1] == 'E'.code.toByte() &&
+                hdr[2] == 'L'.code.toByte() && hdr[3] == 'F'.code.toByte() }
+        } catch (e: Exception) { false }
+    }
+
+    private fun needsRedirect(f: File): Boolean {
+        return try {
+            val len = f.length()
+            RandomAccessFile(f, "r").use { raf ->
+                val ehdr = ByteArray(64)
+                if (raf.read(ehdr) < 64) return false
+                val is64 = ehdr[4] == 2.toByte()
+                if (!is64) return false
+                fun u16(o: Int) = ((ehdr[o].toInt() and 0xff) or
+                        ((ehdr[o + 1].toInt() and 0xff) shl 8))
+                fun u32(o: Int) = (u16(o) or (u16(o + 2) shl 16))
+                fun u64(o: Int): Long {
+                    var v = 0L
+                    for (i in 7 downTo 0) v = (v shl 8) or (ehdr[o + i].toLong().and(0xff))
+                    return v
+                }
+                val e_phoff = u64(0x20).toInt()
+                val e_phentsize = u16(0x36)
+                val e_phnum = u16(0x38)
+                if (e_phoff <= 0 || e_phentsize <= 0) return false
+                val ph = ByteArray(e_phentsize)
+                var hasInterp = false
+                for (i in 0 until e_phnum) {
+                    raf.seek((e_phoff + i * e_phentsize).toLong())
+                    if (raf.read(ph) < e_phentsize) break
+                    val p_type = u32in(ph, 0)
+                    if (p_type == 3) { hasInterp = true; break }
+                }
+                if (!hasInterp) return true
+                val needle = "Bun!".toByteArray()
+                val win = 1 shl 20
+                val buf = ByteArray(win)
+                var pos = len
+                while (pos > 0) {
+                    val startL = maxOf(0L, pos - win)
+                    raf.seek(startL)
+                    val n = raf.read(buf, 0, (pos - startL).toInt())
+                    if (n <= 0) break
+                    if (indexOfBytes(buf, n, needle) >= 0) return true
+                    pos = startL + (needle.size - 1)
+                }
+                false
+            }
+        } catch (e: Exception) {
+            true
+        }
+    }
+
+    private fun u32in(b: ByteArray, o: Int): Int =
+        (b[o].toInt() and 0xff) or ((b[o + 1].toInt() and 0xff) shl 8) or
+                ((b[o + 2].toInt() and 0xff) shl 16) or ((b[o + 3].toInt() and 0xff) shl 24)
+
+    private fun indexOfBytes(hay: ByteArray, hayLen: Int, needle: ByteArray): Int {
+        if (needle.isEmpty() || hayLen < needle.size) return -1
+        outer@ for (i in 0..(hayLen - needle.size)) {
+            for (j in needle.indices) if (hay[i + j] != needle[j]) continue@outer
+            return i
+        }
+        return -1
     }
 }
 
