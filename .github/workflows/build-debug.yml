@@ -30,29 +30,19 @@ jobs:
 
       - name: Setup Android SDK
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends unzip curl wget
-          mkdir -p $HOME/android-sdk/cmdline-tools
-          cd $HOME/android-sdk/cmdline-tools
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          unzip -q commandlinetools-linux-11076708_latest.zip -d cmdline-tools-tmp
-          mv cmdline-tools-tmp/* cmdline-tools/
-          rmdir cmdline-tools-tmp
-          echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
-          echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
-          export PATH=$HOME/android-sdk/cmdline-tools/latest/bin:$PATH
-          yes | sdkmanager --sdk_root=$HOME/android-sdk "platform-tools" "platforms;android-34" "platforms;android-35" "build-tools;35.0.2" >/dev/null 2>&1 || true
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-
-      - name: Cache Gradle Wrapper and dependencies (restore)
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/wrapper/dists
-            ~/.gradle/caches
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle.kts', '**/*.gradle', 'gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
+          set -e
+          SDK=$HOME/android-sdk
+          mkdir -p $SDK/cmdline-tools
+          wget -q -O /tmp/cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q /tmp/cmdtools.zip -d /tmp/cmdtools
+          mv /tmp/cmdtools/cmdline-tools $SDK/cmdline-tools/latest
+          echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
+          echo "$SDK/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          export PATH=$SDK/cmdline-tools/latest/bin:$PATH
+          # Accept licenses first (yes gets SIGPIPE when sdkmanager exits, hence || true)
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-34" "platforms;android-35" "build-tools;35.0.2" "ndk;26.1.10909125" "cmake;3.22.1"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
@@ -61,37 +51,6 @@ jobs:
 
       - name: Make Gradle Wrapper Executable
         run: chmod +x gradlew
-
-      - name: Cache Android NDK and CMake (restore)
-        uses: actions/cache@v4
-        id: cache-ndk
-        with:
-          path: |
-            $HOME/android-sdk/ndk/26.1.10909125
-            $HOME/android-sdk/cmake/3.22.1
-          key: ndk-26.1.10909125-cmake-3.22.1
-          restore-only: true
-          restore-keys: |
-            ndk-
-
-      - name: Install Android NDK and CMake
-        if: steps.cache-ndk.outputs.cache-hit != 'true'
-        run: |
-          export ANDROID_SDK_ROOT=$HOME/android-sdk
-          export ANDROID_HOME=$HOME/android-sdk
-          export PATH=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH
-          sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
-
-      - name: Cache Android SDK platforms and build-tools (restore)
-        uses: actions/cache@v4
-        with:
-          path: |
-            $HOME/android-sdk/platforms
-            $HOME/android-sdk/build-tools
-          key: ${{ runner.os }}-android-sdk-${{ hashFiles('app/build.gradle.kts') }}
-          restore-only: true
-          restore-keys: |
-            ${{ runner.os }}-android-sdk-
 
       - name: Cache cortex-hook Libraries
         uses: actions/cache@v4
@@ -104,7 +63,6 @@ jobs:
           sudo apt-get update -o Acquire::Retries=3 -qq
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf libc6-dev-arm64-cross libc6-dev-armhf-cross dpkg-dev
           mkdir -p hook-libs
-          scripts/build-gosys.sh
           scripts/build-gosys.sh
           aarch64-linux-gnu-gcc -std=gnu11 -shared -fPIC -O3 -fno-delete-null-pointer-checks -Wall -Wno-nonnull-compare -Wl,-z,max-page-size=16384 -o hook-libs/libcortex-hook-arm64.so app/src/main/cpp/cortex-hook.c -ldl
           arm-linux-gnueabihf-gcc -std=gnu11 -shared -fPIC -O3 -fno-delete-null-pointer-checks -Wall -Wno-nonnull-compare -Wl,-z,max-page-size=16384 -o hook-libs/libcortex-hook-arm.so app/src/main/cpp/cortex-hook.c -ldl
@@ -120,30 +78,6 @@ jobs:
       - name: Assemble Debug APK
         run: |
           ./gradlew assembleDebug --build-cache --parallel --stacktrace
-
-      - name: Cache Gradle Wrapper and dependencies (save)
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/wrapper/dists
-            ~/.gradle/caches
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle.kts', '**/*.gradle', 'gradle/wrapper/gradle-wrapper.properties') }}
-
-      - name: Cache Android NDK and CMake (save)
-        uses: actions/cache@v4
-        with:
-          path: |
-            $HOME/android-sdk/ndk/26.1.10909125
-            $HOME/android-sdk/cmake/3.22.1
-          key: ndk-26.1.10909125-cmake-3.22.1
-
-      - name: Cache Android SDK platforms and build-tools (save)
-        uses: actions/cache@v4
-        with:
-          path: |
-            $HOME/android-sdk/platforms
-            $HOME/android-sdk/build-tools
-          key: ${{ runner.os }}-android-sdk-${{ hashFiles('app/build.gradle.kts') }}
 
       - name: Upload Debug APKs
         uses: actions/upload-artifact@v4
