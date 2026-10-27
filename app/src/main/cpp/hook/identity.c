@@ -9,6 +9,12 @@
 uid_t getuid(void) { return 0; }
 uid_t geteuid(void) { return 0; }
 gid_t getgid(void) { return 0; }
+
+static uid_t cortex_real_euid(void) {
+    static long cached = -1;
+    if (cached < 0) cached = syscall(SYS_geteuid);
+    return (uid_t)cached;
+}
 gid_t getegid(void) { return 0; }
 
 int setuid(uid_t uid) { (void)uid; return 0; }
@@ -474,11 +480,11 @@ static int cortex_lookup_passwd(const char *search_name, uid_t search_uid, int b
             }
         } else {
             if (search_uid == 0 || search_uid == real_uid()) {
-                snprintf(found_name, sizeof(found_name), "root");
+                snprintf(found_name, sizeof(found_name), "%s", (search_uid == 0) ? "root" : "cortex");
                 snprintf(found_pass, sizeof(found_pass), "x");
                 found_uid = search_uid;
                 found_gid = 0;
-                snprintf(found_gecos, sizeof(found_gecos), "root");
+                snprintf(found_gecos, sizeof(found_gecos), "%s", found_name);
                 snprintf(found_dir, sizeof(found_dir), "/home");
                 snprintf(found_shell, sizeof(found_shell), "/bin/bash");
                 found = 1;
@@ -724,6 +730,9 @@ struct passwd *CORTEX_NSS_SYM(getpwuid)(uid_t uid) {
     if (res) return res;
 #endif
 
+uid_t real_euid = cortex_real_euid();
+    if (uid != 0 && uid != real_euid) return NULL;
+
     int err = cortex_lookup_passwd(NULL, uid, 0, &s_pwd_storage, s_pwd_buf, sizeof(s_pwd_buf));
     if (err == 0) return &s_pwd_storage;
     return NULL;
@@ -755,6 +764,12 @@ int CORTEX_NSS_SYM(getpwuid_r)(uid_t uid, struct passwd *pwd, char *buf, size_t 
     if (ret != 0 && ret != ENOENT) {
         if (result) *result = NULL;
         return ret;
+    }
+
+    uid_t real_euid = cortex_real_euid();
+    if (uid != 0 && uid != real_euid) {
+        if (result) *result = NULL;
+        return 0;
     }
 
     int err = cortex_lookup_passwd(NULL, uid, 0, pwd, buf, buflen);
