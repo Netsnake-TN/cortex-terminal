@@ -42,7 +42,7 @@ jobs:
           fi
           echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
-          yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$HOME/android-sdk "platform-tools" "platforms;android-35" "build-tools;35.0.2" >/dev/null 2>&1 || true
+          yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$HOME/android-sdk "platform-tools" "platforms;android-34" "platforms;android-35" "build-tools;35.0.2" >/dev/null 2>&1 || true
 
       - name: Accept Android SDK Licenses
         run: |
