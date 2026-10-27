@@ -4,6 +4,8 @@
 // Path translation: Ubuntu paths (/usr, /etc, ...) mapped into the rootfs, Android's own mounts
 // left alone, and the library directories of the rootfs.
 
+#include "hook-common.h"
+
 // ---- Path translation -------------------------------------------------------------------
 // Pure string functions (no syscalls), so tests/native can check them directly. They run on
 // every file-system call, so they avoid snprintf and compute the rootfs prefix length once.
