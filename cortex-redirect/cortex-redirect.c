@@ -81,7 +81,10 @@ static void logmsg(const char *fmt, ...) {
 
 static void build_paths(void) {
     const char *r = getenv("CORTEX_ROOT");
-    if (!r || !*r) r = "/data/user/0/org.cortex.terminal/files/cortex";
+    if (!r || !*r) {
+        fprintf(stderr, "cortex-redirect: CORTEX_ROOT env var is required (no default)\n");
+        exit(1);
+    }
     snprintf(g_root, sizeof(g_root), "%s", r);
     size_t L = strlen(g_root);
     while (L > 1 && g_root[L - 1] == '/') g_root[--L] = '\0';
