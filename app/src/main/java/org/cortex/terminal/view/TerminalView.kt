@@ -66,6 +66,8 @@ class TerminalView @JvmOverloads constructor(
             value?.onRedraw = { postInvalidate() }
             value?.emulator?.onScreenUpdate = onEmulatorScreenUpdate
             if (previous !== value) {
+                // The selection is the old session's: delete over it would act on the new one's line
+                clearSelection()
                 previous?.setFocused(false)
                 value?.setFocused(hasWindowFocus())
                 cursorBlinkOn = true
@@ -1356,20 +1358,30 @@ class TerminalView @JvmOverloads constructor(
     }
 
     fun copySelectionToClipboard(): Boolean {
-        val norm = getNormalizedSelection()
-        val text = session?.emulator?.buffer?.getSelectedText(norm[0], norm[1], norm[2], norm[3]) ?: ""
-        if (text.isNotEmpty()) {
-            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("Cortex", text))
-            Toast.makeText(context, R.string.copied_to_clipboard, Toast.LENGTH_SHORT).show()
-            clearSelection()
-            return true
-        }
+        // Without a selection there is nothing to copy (the numbers are those of the last one)
+        if (!isSelecting) return false
+        val text = selectedTerminalText()
+        if (text != null) putOnClipboard(text)
         clearSelection()
-        return false
+        return text != null
     }
 
-    fun pasteFromClipboard() {
+    /** Cut: copied, then what delete does to the selection (the command line, when the cursor is in it). */
+    private fun cutSelectionToClipboard(): Boolean {
+        val text = selectedTerminalText()
+        if (text != null) putOnClipboard(text)
+        deleteSelection()
+        return text != null
+    }
+
+    private fun putOnClipboard(text: String) {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Cortex", text))
+        Toast.makeText(context, R.string.copied_to_clipboard, Toast.LENGTH_SHORT).show()
+    }
+
+    /** [plainTextOnly]: the clip's text, not the image it may also hold (the keyboard's Paste as plain text). */
+    fun pasteFromClipboard(plainTextOnly: Boolean = false) {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
         val clip = clipboard.primaryClip ?: return
         if (clip.itemCount == 0) return
@@ -1386,7 +1398,8 @@ class TerminalView @JvmOverloads constructor(
                 p.endsWith(".webp", true) || p.endsWith(".gif", true)
             } == true)
 
-        if (uri != null && hasImageMime) {
+        val preferText = plainTextOnly && !item.text.isNullOrEmpty()
+        if (!preferText && uri != null && hasImageMime) {
             val savedPath = saveImageFromUri(uri, mimeType)
             if (savedPath != null) {
                 session?.write(savedPath)
@@ -1503,6 +1516,7 @@ class TerminalView @JvmOverloads constructor(
 
     fun selectAllText() {
         val histSize = session?.emulator?.buffer?.history?.size ?: 0
+        isSelecting = true // from the keyboard's Select all as well, not only from the bar of a selection
         selectStartRow = -histSize
         selectStartCol = 0
         selectEndRow = rows - 1
@@ -1511,6 +1525,44 @@ class TerminalView @JvmOverloads constructor(
         post {
             showActionPopup()
         }
+    }
+
+    /** The text of the selection, for a keyboard that copies it itself; null without one. */
+    private fun selectedTerminalText(): String? {
+        if (!isSelecting) return null
+        val norm = getNormalizedSelection()
+        val emulator = session?.emulator ?: return null
+        // Under the lock: output on the PTY thread moves the rows of the screen and the scrollback
+        val text = emulator.lock.withLock {
+            emulator.buffer.getSelectedText(norm[0], norm[1], norm[2], norm[3])
+        }
+        return text.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * What delete does to a selection (#32). The text on the screen is the programs', so what can be
+     * taken away is what is being typed: with the cursor in the selection (all of it selected, say), the
+     * command line is cleared, with End and then the kill of the line that shells and the tty know
+     * (Ctrl+E, Ctrl+U). Not in a full-screen program, where those keys mean other things (in nano
+     * Ctrl+U pastes). The selection is gone after it either way; true when the line was cleared.
+     */
+    private fun deleteSelection(): Boolean {
+        if (!isSelecting) return false
+        val emulator = session?.emulator
+        var clear = false
+        if (emulator != null) {
+            emulator.lock.withLock {
+                val buffer = emulator.buffer
+                clear = !buffer.isAlternate &&
+                    selectionHoldsCell(getNormalizedSelection(), buffer.cursorRow, buffer.cursorCol)
+            }
+        }
+        clearSelection()
+        if (clear) {
+            scrollOffset = 0
+            session?.write(CLEAR_LINE)
+        }
+        return clear
     }
 
     /**
@@ -1692,7 +1744,26 @@ class TerminalView @JvmOverloads constructor(
 
             override fun getTextAfterCursor(n: Int, flags: Int): CharSequence = ""
 
-            override fun getSelectedText(flags: Int): CharSequence? = null
+            override fun getSelectedText(flags: Int): CharSequence? = selectedTerminalText()
+
+            /** The keyboard's own Select all, Copy, Cut and Paste buttons (the system's names for them). */
+            override fun performContextMenuAction(id: Int): Boolean = when (id) {
+                android.R.id.selectAll -> {
+                    selectAllText()
+                    true
+                }
+                android.R.id.copy -> copySelectionToClipboard()
+                android.R.id.cut -> cutSelectionToClipboard()
+                android.R.id.paste -> {
+                    pasteFromClipboard()
+                    true
+                }
+                android.R.id.pasteAsPlainText -> {
+                    pasteFromClipboard(plainTextOnly = true)
+                    true
+                }
+                else -> super.performContextMenuAction(id)
+            }
 
             @RequiresApi(Build.VERSION_CODES.S)
             override fun getSurroundingText(beforeLength: Int, afterLength: Int, flags: Int): SurroundingText {
@@ -1749,6 +1820,11 @@ class TerminalView @JvmOverloads constructor(
             }
 
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                // Nothing committed over a selection is how a keyboard deletes it
+                if (text.isNullOrEmpty() && composingLength == 0 && deleteSelection()) {
+                    lineIsBack()
+                    return true
+                }
                 clearSelection()
                 // What the keyboard was composing (the pinyin of a Chinese word, the kana of a Japanese
                 // one) is on the line already: the text it commits replaces it
@@ -1799,7 +1875,11 @@ class TerminalView @JvmOverloads constructor(
             }
 
             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-                clearSelection()
+                if (deleteSelection()) {
+                    composingLength = 0 // the line it was composed on is gone
+                    lineIsBack()
+                    return true
+                }
                 if (beforeLength == 0 && afterLength == 0) {
                     sendKeySequence(KeyEvent.KEYCODE_DEL)
                 } else {
@@ -1822,7 +1902,6 @@ class TerminalView @JvmOverloads constructor(
 
             override fun sendKeyEvent(event: KeyEvent): Boolean {
                 if (event.action == KeyEvent.ACTION_DOWN) {
-                    clearSelection()
                     val handled = onKeyDown(event.keyCode, event)
                     if (event.keyCode == KeyEvent.KEYCODE_DEL || event.keyCode == KeyEvent.KEYCODE_FORWARD_DEL) lineIsBack()
                     return handled
@@ -1934,6 +2013,22 @@ class TerminalView @JvmOverloads constructor(
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        // The keys of a keyboard's clipboard buttons, and delete over a selection
+        when (keyCode) {
+            KeyEvent.KEYCODE_PASTE -> {
+                pasteFromClipboard()
+                return true
+            }
+            KeyEvent.KEYCODE_COPY -> {
+                copySelectionToClipboard()
+                return true
+            }
+            KeyEvent.KEYCODE_CUT -> {
+                cutSelectionToClipboard()
+                return true
+            }
+            KeyEvent.KEYCODE_DEL, KeyEvent.KEYCODE_FORWARD_DEL -> if (deleteSelection()) return true
+        }
         clearSelection()
         scrollOffset = 0
         if (sendKeySequence(keyCode)) {
@@ -1991,6 +2086,17 @@ private const val IME_LINE = " "
  */
 internal fun selectionBackground(dark: Boolean, background: Int, accent: Int): Int =
     if (dark) Chrome.WHITE else Chrome.mix(background, accent, 0.35f)
+
+/** What clears the command line: End, then the kill of the line (the tty's and readline's Ctrl+U). */
+private const val CLEAR_LINE = "\u0005\u0015"
+
+/**
+ * Whether the cell ([row], [col]) is in the selection [norm]: its first row and column, then its last
+ * ones, in this order (the buffer's rows: those of the scrollback are negative).
+ */
+internal fun selectionHoldsCell(norm: IntArray, row: Int, col: Int): Boolean =
+    (row > norm[0] || (row == norm[0] && col >= norm[1])) &&
+        (row < norm[2] || (row == norm[2] && col <= norm[3]))
 
 /** The text sizes two fingers can set, in sp. */
 internal const val MIN_PINCH_TEXT_SP = 6f
