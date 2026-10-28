@@ -1,6 +1,28 @@
 // Part of libcortex-hook.so, included by cortex-hook.c (one translation unit, so the
 // parts share their static functions and are built with the same command as before).
 //
+// ---- Per-process passwd entry paths (real host paths) -------------------------------
+// Runtime that issues raw syscalls (Bun/Node) gets these real paths straight to the kernel,
+// where they exist. libc callers get already-real paths (re-rooted into the cortex rootfs).
+// Virtual paths remain correct in the resolve direction (open/stat/exec args).
+static char g_pw_dir[PATH_MAX] = {0};
+static char g_pw_shell[PATH_MAX] = {0};
+
+// Forward declaration: defined later in setup.c (included after this file).
+static void init_cortex_hook(void);
+
+static void init_cortex_pw_paths(void) {
+    if (g_pw_dir[0] != '\0') return;
+    init_cortex_hook();
+    if (g_cortex_root[0] != '\0') {
+        snprintf(g_pw_dir, sizeof(g_pw_dir), "%s/home", g_cortex_root);
+        snprintf(g_pw_shell, sizeof(g_pw_shell), "%s/usr/bin/bash", g_cortex_root);
+    } else {
+        snprintf(g_pw_dir, sizeof(g_pw_dir), "/home");
+        snprintf(g_pw_shell, sizeof(g_pw_shell), "/usr/bin/bash");
+    }
+}
+
 // Path translation: Ubuntu paths (/usr, /etc, ...) mapped into the rootfs, Android's own mounts
 // left alone, and the library directories of the rootfs.
 
