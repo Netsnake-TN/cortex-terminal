@@ -5,6 +5,9 @@
 // Runtime that issues raw syscalls (Bun/Node) gets these real paths straight to the kernel,
 // where they exist. libc callers get already-real paths (re-rooted into the cortex rootfs).
 // Virtual paths remain correct in the resolve direction (open/stat/exec args).
+
+#include "hook-common.h"
+
 static char g_pw_dir[PATH_MAX] = {0};
 static char g_pw_shell[PATH_MAX] = {0};
 
@@ -25,8 +28,6 @@ static void init_cortex_pw_paths(void) {
 
 // Path translation: Ubuntu paths (/usr, /etc, ...) mapped into the rootfs, Android's own mounts
 // left alone, and the library directories of the rootfs.
-
-#include "hook-common.h"
 
 // ---- Path translation -------------------------------------------------------------------
 // Pure string functions (no syscalls), so tests/native can check them directly. They run on
