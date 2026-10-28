@@ -47,7 +47,11 @@ object Environment {
                     "$root/usr/bin",
                     "$root/usr/local/sbin",
                     "$root/usr/sbin",
-                    "$root/sbin"
+                    "$root/sbin",
+                    // Android host commands (toybox) — e.g. curl — needed when the
+                    // guest rootfs doesn't ship its own copy. Kept last so guest
+                    // binaries take precedence over host ones.
+                    "/system/bin"
                 )
                 pathList.joinToString(":").also { cachedPathStr = it }
             }
