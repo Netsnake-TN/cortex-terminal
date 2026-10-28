@@ -24,37 +24,55 @@ object Environment {
         return File(context.applicationInfo.nativeLibraryDir)
     }
 
-    fun buildEnvironment(context: Context): Array<String> {
+    @Volatile private var cachedPathStr: String? = null
+    @Volatile private var cachedLdPathStr: String? = null
+    @Volatile private var cachedPreloadStr: String? = null
+    @Volatile private var cachedCertFile: String? = null
+    @Volatile private var cachedCertDir: String? = null
+    @Volatile private var cachedTerminfo: String? = null
+    @Volatile private var cachedTerminfoDirs: String? = null
+    @Volatile private var cachedEffectiveTz: String? = null
+
+    fun buildEnvironment(context: Context, rows: Int = 24, cols: Int = 80): Array<String> {
         val root = getCortexRoot(context).absolutePath
         val home = getHomeDir(context).absolutePath
         val tmp = getTmpDir(context).absolutePath
 
-        val pathList = listOf(
-            "/home/.local/bin",
-            "$home/.local/bin",
-            "$root/usr/local/bin",
-            "$root/bin",
-            "$root/usr/bin",
-            "$root/usr/local/sbin",
-            "$root/usr/sbin",
-            "$root/sbin",
-            "/system/bin",
-            "/system/xbin"
-        )
-        val pathStr = pathList.joinToString(":")
+        val pathStr = synchronized(this) {
+            cachedPathStr ?: run {
+                val pathList = listOf(
+                    "$home/.local/bin",
+                    "$root/usr/local/bin",
+                    "$root/bin",
+                    "$root/usr/bin",
+                    "$root/usr/local/sbin",
+                    "$root/usr/sbin",
+                    "$root/sbin"
+                )
+                pathList.joinToString(":").also { cachedPathStr = it }
+            }
+        }
 
-        val ldPathStr = LibraryPath.forRoot(root)
+        val ldPathStr = synchronized(this) {
+            cachedLdPathStr ?: run {
+                LibraryPath.forRoot(root).also { cachedLdPathStr = it }
+            }
+        }
 
         val glibcHooks = listOf(
             File(root, "usr/lib/libcortex-hook.so"),
             File(root, "lib/libcortex-hook.so")
         )
-        var hookLib = glibcHooks.firstOrNull { it.exists() }
-        if (hookLib == null) {
-            BootstrapManager.ensureHookLibrary(context, File(root))
-            hookLib = glibcHooks.firstOrNull { it.exists() }
+        val preloadStr = synchronized(this) {
+            cachedPreloadStr ?: run {
+                var hookLib = glibcHooks.firstOrNull { it.exists() }
+                if (hookLib == null) {
+                    BootstrapManager.ensureHookLibrary(context, File(root))
+                    hookLib = glibcHooks.firstOrNull { it.exists() }
+                }
+                hookLib?.absolutePath ?: ""
+            }.also { cachedPreloadStr = it }
         }
-        val preloadStr = hookLib?.absolutePath ?: ""
 
         val tz = try {
             java.util.TimeZone.getDefault()
@@ -85,16 +103,37 @@ object Environment {
         } else {
             "%s%s%d".format(stdName, posixSign, hours)
         }
-        val effectiveTz = if (File(root, "usr/share/zoneinfo/$tzId").exists()) tzId else posixTz
+        val effectiveTz = synchronized(this) {
+            cachedEffectiveTz ?: run {
+                if (File(root, "usr/share/zoneinfo/$tzId").exists()) tzId else posixTz
+            }.also { cachedEffectiveTz = it }
+        }
 
-        val certFile = File(root, "etc/ssl/certs/ca-certificates.crt").absolutePath
-        val certDir = "${File(root, "etc/ssl/certs").absolutePath}:/system/etc/security/cacerts"
+        val certFile = synchronized(this) {
+            cachedCertFile ?: run {
+                File(root, "etc/ssl/certs/ca-certificates.crt").absolutePath
+            }.also { cachedCertFile = it }
+        }
+        val certDir = synchronized(this) {
+            cachedCertDir ?: run {
+                "${File(root, "etc/ssl/certs").absolutePath}:/system/etc/security/cacerts"
+            }.also { cachedCertDir = it }
+        }
 
-        val terminfo = "$root/usr/share/terminfo"
-        val terminfoDirs = "$root/usr/share/terminfo:$root/lib/terminfo:$root/etc/terminfo:/usr/share/terminfo"
+        val terminfo = synchronized(this) {
+            cachedTerminfo ?: run {
+                "$root/usr/share/terminfo"
+            }.also { cachedTerminfo = it }
+        }
+        val terminfoDirs = synchronized(this) {
+            cachedTerminfoDirs ?: run {
+                "$root/usr/share/terminfo:$root/lib/terminfo:$root/etc/terminfo:/usr/share/terminfo"
+            }.also { cachedTerminfoDirs = it }
+        }
 
         val envList = mutableListOf(
             "TERM=xterm-256color",
+            "TERM_PROGRAM=cortex",
             "COLORTERM=truecolor",
             "HOME=$home",
             "CORTEX_ROOT=$root",
@@ -107,12 +146,11 @@ object Environment {
             "LOCPATH=$root/usr/lib/locale",
             "USER=cortex",
             "LOGNAME=cortex",
-            // Stock Ubuntu exports SHELL at login; installers (nvm, bun, pnpm, rustup, opencode, ...)
-            // read it to decide which rc file to append their PATH setup to.
             "SHELL=/bin/bash",
             "HOSTNAME=cortex-android",
             "PS1=\\w $ ",
-            "ENV=$home/.profile",
+            "LD_BIND_NOW=1",
+            "XDG_RUNTIME_DIR=$root/run/user/0",
             "DPKG_DEB_THREADS_MAX=1",
             "XZ_OPT=-T1",
             "XZ_DEFAULTS=-T1",
@@ -129,7 +167,9 @@ object Environment {
             "TERMINFO=$terminfo",
             "TERMINFO_DIRS=$terminfoDirs",
             "GODEBUG=netdns=cgo",
-            "BROWSER=/usr/local/bin/xdg-open"
+            "BROWSER=/usr/local/bin/xdg-open",
+            "LINES=$rows",
+            "COLUMNS=$cols"
         )
 
         if (preloadStr.isNotEmpty()) {
