@@ -14,92 +14,29 @@
 
 static int (*get_real_sigaction(void))(int, const struct sigaction *, struct sigaction *);
 
-// Intercept SECCOMP blocked syscalls (SIGSYS), resolve sandbox/landlock gracefully, and advance PC
+// Intercept SECCOMP blocked syscalls (SIGSYS), answer -ENOSYS so glibc/raw
+// syscalls fall back, and advance PC past the trapped svc #0. Without the
+// advance the same instruction re-executes on return and re-traps forever —
+// which is what kills dynamic Bun/Go tool spawns.
+// Forward-only check: read only the mapped instruction at PC (never PC-4,
+// which can cross a page boundary and fault inside the handler), and it's a
+// no-op if PC is not the trapped `svc #0`.
 static void cortex_sigsys_handler(int sig, siginfo_t *info, void *ctx) {
-    if (!ctx || !info) return;
-    if (info->si_code != SYS_SECCOMP) {
-        int (*real_sig)(int, const struct sigaction *, struct sigaction *) = get_real_sigaction();
-        if (real_sig) {
-            struct sigaction sa_dfl;
-            memset(&sa_dfl, 0, sizeof(sa_dfl));
-            sa_dfl.sa_handler = SIG_DFL;
-            sigemptyset(&sa_dfl.sa_mask);
-            real_sig(sig, &sa_dfl, NULL);
-        }
-        raise(sig);
-        return;
-    }
+    (void)sig;
+    if (!ctx) return;
     ucontext_t *uctx = (ucontext_t *)ctx;
-
-    int sys_nr = info->si_syscall;
-    long ret_val = is_sigsys_synthetic_success_syscall(sys_nr) ? 0 : -ENOSYS;
-
+    if (info && info->si_code != SYS_SECCOMP) return;
 #if defined(__aarch64__)
-    uctx->uc_mcontext.regs[0] = (uint64_t)ret_val;
-    if (uctx->uc_mcontext.pc >= 4) {
-        uint32_t insn_at_pc = 0;
-        uint32_t insn_before_pc = 0;
-        memcpy(&insn_at_pc, (const void *)uctx->uc_mcontext.pc, sizeof(insn_at_pc));
-        memcpy(&insn_before_pc, (const void *)(uctx->uc_mcontext.pc - 4), sizeof(insn_before_pc));
-        // On SECCOMP_RET_TRAP, the kernel already advanced PC past svc #0 (*(pc - 4) is svc #0).
-        // Only advance PC if PC itself points to svc #0 and *(pc - 4) does not.
-        int at_is_svc = ((insn_at_pc & 0xffe0001fU) == 0xd4000001U);
-        int prev_is_svc = ((insn_before_pc & 0xffe0001fU) == 0xd4000001U);
-        if (at_is_svc && !prev_is_svc) {
-            uctx->uc_mcontext.pc += 4;
-        }
-    }
+    uctx->uc_mcontext.regs[0] = (uint64_t)-ENOSYS;
+    uint32_t at = 0;
+    memcpy(&at, (const void *)uctx->uc_mcontext.pc, sizeof at);
+    if (at == 0xd4000001U) uctx->uc_mcontext.pc += 4;
 #elif defined(__arm__)
-    uctx->uc_mcontext.arm_r0 = (unsigned long)ret_val;
-    if (uctx->uc_mcontext.arm_pc >= 4) {
-        if (uctx->uc_mcontext.arm_cpsr & 0x20) {
-            uint16_t insn_at_pc = 0;
-            uint16_t insn_before_pc = 0;
-            memcpy(&insn_at_pc, (const void *)uctx->uc_mcontext.arm_pc, sizeof(insn_at_pc));
-            memcpy(&insn_before_pc, (const void *)(uctx->uc_mcontext.arm_pc - 2), sizeof(insn_before_pc));
-            int at_is_svc = ((insn_at_pc & 0xff00U) == 0xdf00U);
-            int prev_is_svc = ((insn_before_pc & 0xff00U) == 0xdf00U);
-            if (at_is_svc && !prev_is_svc) {
-                uctx->uc_mcontext.arm_pc += 2;
-            }
-        } else {
-            uint32_t insn_at_pc = 0;
-            uint32_t insn_before_pc = 0;
-            memcpy(&insn_at_pc, (const void *)uctx->uc_mcontext.arm_pc, sizeof(insn_at_pc));
-            memcpy(&insn_before_pc, (const void *)(uctx->uc_mcontext.arm_pc - 4), sizeof(insn_before_pc));
-            int at_is_svc = ((insn_at_pc & 0x0f000000U) == 0x0f000000U);
-            int prev_is_svc = ((insn_before_pc & 0x0f000000U) == 0x0f000000U);
-            if (at_is_svc && !prev_is_svc) {
-                uctx->uc_mcontext.arm_pc += 4;
-            }
-        }
-    }
+    uctx->uc_mcontext.arm_r0 = (unsigned long)-ENOSYS;
 #elif defined(__x86_64__) && defined(REG_RAX)
-    uctx->uc_mcontext.gregs[REG_RAX] = (greg_t)ret_val;
-    if (uctx->uc_mcontext.gregs[REG_RIP] >= 2) {
-        unsigned char insn_at[2] = {0};
-        unsigned char insn_prev[2] = {0};
-        memcpy(insn_at, (const void *)uctx->uc_mcontext.gregs[REG_RIP], sizeof(insn_at));
-        memcpy(insn_prev, (const void *)(uctx->uc_mcontext.gregs[REG_RIP] - 2), sizeof(insn_prev));
-        int at_is_sys = (insn_at[0] == 0x0f && insn_at[1] == 0x05);
-        int prev_is_sys = (insn_prev[0] == 0x0f && insn_prev[1] == 0x05);
-        if (at_is_sys && !prev_is_sys) {
-            uctx->uc_mcontext.gregs[REG_RIP] += 2;
-        }
-    }
+    uctx->uc_mcontext.gregs[REG_RAX] = (greg_t)-ENOSYS;
 #elif defined(__i386__) && defined(REG_EAX)
-    uctx->uc_mcontext.gregs[REG_EAX] = (greg_t)ret_val;
-    if (uctx->uc_mcontext.gregs[REG_EIP] >= 2) {
-        unsigned char insn_at[2] = {0};
-        unsigned char insn_prev[2] = {0};
-        memcpy(insn_at, (const void *)uctx->uc_mcontext.gregs[REG_EIP], sizeof(insn_at));
-        memcpy(insn_prev, (const void *)(uctx->uc_mcontext.gregs[REG_EIP] - 2), sizeof(insn_prev));
-        int at_is_sys = (insn_at[0] == 0xcd && insn_at[1] == 0x80);
-        int prev_is_sys = (insn_prev[0] == 0xcd && insn_prev[1] == 0x80);
-        if (at_is_sys && !prev_is_sys) {
-            uctx->uc_mcontext.gregs[REG_EIP] += 2;
-        }
-    }
+    uctx->uc_mcontext.gregs[REG_EAX] = (greg_t)-ENOSYS;
 #endif
 }
 
