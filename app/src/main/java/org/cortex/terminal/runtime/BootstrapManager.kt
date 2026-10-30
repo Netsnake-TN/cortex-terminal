@@ -1020,6 +1020,9 @@ object BootstrapManager {
             if (!passwdText.contains("sshd:")) {
                 passwdText += "sshd:x:101:101:Privilege-separated SSH:/run/sshd:/usr/sbin/nologin\n"
             }
+            if (!passwdText.contains("nobody:")) {
+                passwdText += "nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n"
+            }
             // The system users and groups every Ubuntu has (man, www-data, adm, tty...): packages'
             // scripts use them, and an image that kept only root and cortex made redis, nginx and
             // PostgreSQL fail to install
