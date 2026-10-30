@@ -499,6 +499,9 @@ object BootstrapManager {
             dpkgShare.mkdirs()
             File(root, "etc/alternatives").mkdirs()
             File(root, "var/lib/dpkg/alternatives").mkdirs()
+            File(root, "var/lib/dpkg").mkdirs()
+            File(root, "var/lib/dpkg/lock").takeIf { !it.exists() }?.createNewFile()
+            File(root, "var/lib/dpkg/lock-frontend").takeIf { !it.exists() }?.createNewFile()
 
             val cpuTable = File(dpkgShare, "cputable")
             if (!cpuTable.exists() || cpuTable.length() == 0L) {
