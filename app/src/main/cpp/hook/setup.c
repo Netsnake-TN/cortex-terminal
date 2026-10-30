@@ -19,7 +19,15 @@ static void init_cortex_hook(void) {
     } else {
         Dl_info info;
         if (dladdr((void *)init_cortex_hook, &info) && info.dli_fname) {
+            // The preload is mapped from BOTH spellings on this rootfs: the app
+            // logs show hook1 = <root>/usr/lib/libcortex-hook.so and
+            // hook2 = <root>/lib/libcortex-hook.so. The needle must include the
+            // lib dir so that len = p - fname yields the ROOT (not the lib dir).
+            // Order matters: the longer needle is tried first, because the
+            // shorter "/lib/libcortex-hook" also occurs INSIDE the string
+            // "/usr/lib/libcortex-hook" and would leave g_cortex_root="/usr".
             const char *p = strstr(info.dli_fname, "/usr/lib/libcortex-hook");
+            if (!p) p = strstr(info.dli_fname, "/lib/libcortex-hook");
             if (p && p > info.dli_fname) {
                 size_t len = p - info.dli_fname;
                 if (len < sizeof(g_cortex_root)) {
