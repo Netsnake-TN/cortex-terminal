@@ -350,7 +350,21 @@ int main(int argc, char *argv[]) {
             _exit(1);
         }
         int notif_fd = install_seccomp_filter();
-        if (notif_fd < 0) { perror("seccomp install"); _exit(1); }
+        if (notif_fd < 0) {
+            /* seccomp user-notification not available on this kernel (ENOSYS).
+             * Fall back to direct exec without /home redirection. */
+            logmsg("seccomp install failed: %s — falling back to direct exec",
+                   strerror(errno));
+            close(sock_fds[1]);
+            char **cargv = (char **)calloc((size_t)(argc - arg_start + 2), sizeof(char *));
+            int n = 0;
+            cargv[n++] = (char *)target;
+            for (int i = arg_start; i < argc; i++) cargv[n++] = argv[i];
+            cargv[n] = NULL;
+            execvp(target, cargv);
+            perror(target);
+            _exit(127);
+        }
         if (send_fd(sock_fds[1], notif_fd) < 0) { perror("send_fd"); _exit(1); }
         char ack;
         if (read(sock_fds[1], &ack, 1) <= 0) _exit(1);
@@ -371,9 +385,13 @@ int main(int argc, char *argv[]) {
     close(sock_fds[1]);
     int notif_fd = recv_fd(sock_fds[0]);
     if (notif_fd < 0) {
-        fprintf(stderr, "failed to receive notif fd\n");
-        kill(child, SIGKILL);
-        waitpid(child, NULL, 0);
+        /* Child fell back to direct exec (no seccomp). Just wait for it. */
+        waitpid(child, &g_child_status, 0);
+        if (WIFEXITED(g_child_status)) return WEXITSTATUS(g_child_status);
+        if (WIFSIGNALED(g_child_status)) {
+            signal(WTERMSIG(g_child_status), SIG_DFL);
+            raise(WTERMSIG(g_child_status));
+        }
         return 1;
     }
     char ack = 'A';
