@@ -1046,6 +1046,24 @@ object BootstrapManager {
             if (!groupText.contains("ssh:")) {
                 groupText += "ssh:x:101:\n"
             }
+            for ((gname, gid) in listOf(
+                "root" to 0, "daemon" to 1, "bin" to 2, "sys" to 3, "adm" to 4,
+                "tty" to 5, "disk" to 6, "lp" to 7, "mail" to 8, "news" to 9,
+                "uucp" to 10, "man" to 12, "proxy" to 13, "kmem" to 15,
+                "dialout" to 20, "fax" to 21, "voice" to 22, "cdrom" to 24,
+                "floppy" to 25, "tape" to 26, "sudo" to 27, "audio" to 29,
+                "dip" to 30, "www-data" to 33, "backup" to 34, "operator" to 37,
+                "list" to 38, "irc" to 39, "src" to 40, "gnats" to 41,
+                "shadow" to 42, "utmp" to 43, "video" to 44, "sasl" to 45,
+                "plugdev" to 46, "staff" to 50, "games" to 60, "users" to 100,
+                "nogroup" to 65534,
+                "messagebus" to 102, "_ssh" to 101, "input" to 999,
+                "render" to 998
+            )) {
+                if (!groupText.contains("$gname:x:$gid:")) {
+                    groupText += "$gname:x:$gid:\n"
+                }
+            }
             val baseGroup = BaseUsers.mergeGroup(groupText, master("group.master"))
             groupText = baseGroup.text
             FileInstaller.install(groupFile, groupText, 420)
