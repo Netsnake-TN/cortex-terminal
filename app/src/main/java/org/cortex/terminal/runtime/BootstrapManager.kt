@@ -1077,6 +1077,9 @@ object BootstrapManager {
         try {
             val localBin = File(home, ".local/bin")
             localBin.mkdirs()
+            File(home, ".local/share").mkdirs()
+            File(home, ".cache").mkdirs()
+            File(home, ".config").mkdirs()
 
             val binDir = File(root, "bin")
             val isBinDirSymlink = binDir.exists() && ElfLinkerPatcher.isSymlink(binDir)
